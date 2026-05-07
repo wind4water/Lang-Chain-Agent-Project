@@ -1,0 +1,187 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
+from agent_persistent import ConversationAgentWithPersistence
+from dotenv import load_dotenv
+import uvicorn
+
+
+# 加载环境变量
+load_dotenv()
+
+# 全局Agent实例
+agent = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    global agent
+    # 启动时初始化Agent（SQLite持久化版本）
+    agent = ConversationAgentWithPersistence()
+    print("✅ LangChain Agent initialized with SQLite checkpoint support")
+    yield
+    # 关闭时清理（如果需要）
+    print("🔄 Shutting down...")
+
+
+# 创建FastAPI应用
+app = FastAPI(
+    title="LangChain对话Agent",
+    description="基于LangChain和LangGraph的对话Agent，支持checkpoint会话管理",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+
+# 请求模型
+class ChatRequest(BaseModel):
+    message: str = Field(..., description="用户消息")
+    session_id: str = Field(default="default", description="会话ID，用于区分不同用户会话")
+
+
+class ChatResponse(BaseModel):
+    response: str = Field(..., description="AI回复")
+    session_id: str = Field(..., description="会话ID")
+
+
+class HistoryResponse(BaseModel):
+    session_id: str
+    history: list
+
+
+@app.get("/")
+async def root():
+    """根路径"""
+    return {
+        "message": "LangChain对话Agent API",
+        "storage": "SQLite Persistent Storage",
+        "endpoints": {
+            "POST /chat": "发送消息进行对话",
+            "GET /history/{session_id}": "获取会话历史",
+            "DELETE /history/{session_id}": "清除会话历史",
+            "GET /sessions": "查看所有会话列表",
+            "GET /database/stats": "查看数据库统计信息",
+            "GET /database/sessions/{session_id}": "查看指定会话的详细信息",
+            "GET /health": "健康检查"
+        }
+    }
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    与Agent对话
+
+    - **message**: 用户消息
+    - **session_id**: 会话ID（可选，默认为"default"）
+    """
+    try:
+        response = await agent.chat(request.message, request.session_id)
+        return ChatResponse(
+            response=response,
+            session_id=request.session_id
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"处理消息时出错: {str(e)}")
+
+
+@app.get("/history/{session_id}", response_model=HistoryResponse)
+async def get_history(session_id: str):
+    """
+    获取指定会话的历史记录
+
+    - **session_id**: 会话ID
+    """
+    try:
+        history = await agent.get_history(session_id)
+        return HistoryResponse(
+            session_id=session_id,
+            history=history
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取历史记录时出错: {str(e)}")
+
+
+@app.delete("/history/{session_id}")
+async def clear_history(session_id: str):
+    """
+    清除指定会话的历史记录
+
+    - **session_id**: 会话ID
+    """
+    try:
+        await agent.clear_history(session_id)
+        return {"message": f"会话 {session_id} 的历史记录已清除"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"清除历史记录时出错: {str(e)}")
+
+
+@app.get("/health")
+async def health():
+    """健康检查"""
+    return {
+        "status": "healthy",
+        "agent_initialized": agent is not None,
+        "storage_type": "SQLite"
+    }
+
+
+@app.get("/sessions")
+async def list_sessions():
+    """
+    列出所有会话ID
+
+    返回数据库中所有的session_id列表
+    """
+    try:
+        sessions = agent.list_all_sessions()
+        return {
+            "total": len(sessions),
+            "sessions": sessions
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询会话列表时出错: {str(e)}")
+
+
+@app.get("/database/stats")
+async def get_database_stats():
+    """
+    获取数据库统计信息
+
+    返回：
+    - 总会话数
+    - 总checkpoint数
+    - 数据库文件大小
+    - 每个会话的详细信息
+    """
+    try:
+        stats = agent.get_database_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取数据库统计信息时出错: {str(e)}")
+
+
+@app.get("/database/sessions/{session_id}")
+async def get_session_detail(session_id: str):
+    """
+    获取指定会话的详细信息
+
+    - **session_id**: 会话ID
+
+    返回该会话的所有checkpoint详细信息
+    """
+    try:
+        detail = agent.get_session_detail(session_id)
+        return detail
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取会话详细信息时出错: {str(e)}")
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
