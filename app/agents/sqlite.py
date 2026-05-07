@@ -1,6 +1,7 @@
 """
 升级版Agent - 支持持久化存储到SQLite数据库
 上下文会保存到磁盘文件，重启服务后仍然存在
+支持3种上下文压缩策略：滑动窗口、Token计数、智能摘要
 """
 from typing import Annotated
 from typing_extensions import TypedDict
@@ -50,12 +51,29 @@ class SqliteAgent:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
+        # 读取压缩策略配置
+        self.compression_strategy = os.getenv("CONTEXT_COMPRESSION_STRATEGY", "none")
+        self.window_size = int(os.getenv("COMPRESSION_WINDOW_SIZE", "10"))
+        self.max_tokens = int(os.getenv("COMPRESSION_MAX_TOKENS", "4000"))
+        self.summary_threshold = int(os.getenv("COMPRESSION_SUMMARY_THRESHOLD", "20"))
+
+        # 如果使用摘要策略，初始化摘要LLM（使用更便宜的模型）
+        self.summary_llm = None
+        if self.compression_strategy == "summary":
+            self.summary_llm = ChatOpenAI(
+                model=os.getenv("SUMMARY_MODEL_NAME", "gpt-4o-mini"),
+                temperature=0.3,
+                api_key=api_key,
+                base_url=os.getenv("OPENAI_BASE_URL")
+            )
+
         # checkpointer 将在首次使用时异步初始化
         self._conn = None
         self.checkpointer = None
         self.graph = None
 
         print(f"✅ 配置持久化存储：{os.path.abspath(db_path)}")
+        print(f"✅ 上下文压缩策略: {self.compression_strategy}")
 
     async def _ensure_initialized(self):
         """确保checkpointer和graph已初始化"""
@@ -119,10 +137,107 @@ class SqliteAgent:
         await self._conn.commit()
         print(f"✅ 数据库表已初始化")
 
-    def _chat_node(self, state: State):
+    def _compress_sliding_window(self, messages: list) -> list:
+        """压缩策略1: 滑动窗口 - 只保留最近N轮对话"""
+        if len(messages) <= self.window_size * 2:
+            return messages
+
+        # 保留系统消息
+        system_messages = [m for m in messages if isinstance(m, SystemMessage)]
+        other_messages = [m for m in messages if not isinstance(m, SystemMessage)]
+
+        # 保留最近N轮对话（N轮 = 2N条消息）
+        recent_messages = other_messages[-(self.window_size * 2):]
+
+        result = system_messages + recent_messages
+        print(f"🔄 [滑动窗口] 压缩: {len(messages)} → {len(result)} 条消息")
+        return result
+
+    def _compress_token_limit(self, messages: list) -> list:
+        """压缩策略2: Token计数 - 按token数量裁剪"""
+        # 保留系统消息
+        system_messages = [m for m in messages if isinstance(m, SystemMessage)]
+        other_messages = [m for m in messages if not isinstance(m, SystemMessage)]
+
+        # 从后往前累加，直到达到token限制
+        trimmed = []
+        token_count = 0
+
+        for msg in reversed(other_messages):
+            # 粗略估计：4个字符约等于1个token
+            msg_tokens = len(str(msg.content)) // 4
+
+            if token_count + msg_tokens > self.max_tokens:
+                break
+
+            trimmed.insert(0, msg)
+            token_count += msg_tokens
+
+        result = system_messages + trimmed
+        print(f"🔄 [Token计数] 压缩: {len(messages)} → {len(result)} 条消息 (约{token_count} tokens)")
+        return result
+
+    async def _compress_summary(self, messages: list) -> list:
+        """压缩策略3: 智能摘要 - 用LLM总结旧对话"""
+        if len(messages) <= self.summary_threshold * 2:
+            return messages
+
+        # 保留系统消息
+        system_messages = [m for m in messages if isinstance(m, SystemMessage)]
+        other_messages = [m for m in messages if not isinstance(m, SystemMessage)]
+
+        # 旧对话：需要摘要（除了最近3轮）
+        old_messages = other_messages[:-(6)]
+        recent_messages = other_messages[-(6):]
+
+        if len(old_messages) > 0:
+            # 生成摘要
+            summary_prompt = ChatPromptTemplate.from_messages([
+                SystemMessage(content="""请总结以下对话的关键信息，要求：
+1. 提炼用户的主要问题和需求
+2. 总结已经讨论的关键点
+3. 记录重要的决策或结论
+4. 用3-5句话概括，保留所有关键信息"""),
+                MessagesPlaceholder(variable_name="messages")
+            ])
+
+            summary_chain = summary_prompt | self.summary_llm | StrOutputParser()
+
+            try:
+                summary_text = await summary_chain.ainvoke({"messages": old_messages})
+                summary_msg = SystemMessage(content=f"📝 历史对话摘要：\n{summary_text}")
+
+                result = system_messages + [summary_msg] + recent_messages
+                print(f"🔄 [智能摘要] 压缩: {len(messages)} → {len(result)} 条消息 (摘要+最近3轮)")
+                return result
+            except Exception as e:
+                print(f"⚠️ 摘要生成失败: {e}，回退到滑动窗口策略")
+                return self._compress_sliding_window(messages)
+
+        return messages
+
+    async def _apply_compression(self, messages: list) -> list:
+        """应用配置的压缩策略"""
+        if self.compression_strategy == "none":
+            return messages
+        elif self.compression_strategy == "sliding_window":
+            return self._compress_sliding_window(messages)
+        elif self.compression_strategy == "token_limit":
+            return self._compress_token_limit(messages)
+        elif self.compression_strategy == "summary":
+            return await self._compress_summary(messages)
+        else:
+            print(f"⚠️ 未知的压缩策略: {self.compression_strategy}，不进行压缩")
+            return messages
+
+    async def _chat_node(self, state: State):
         """对话节点"""
         messages = state["messages"]
-        response = self.chain.invoke({"messages": messages})
+
+        # 应用压缩策略
+        compressed_messages = await self._apply_compression(messages)
+
+        response = await self.chain.ainvoke({"messages": compressed_messages})
         return {"messages": [AIMessage(content=response)]}
 
     async def chat(self, message: str, session_id: str) -> str:

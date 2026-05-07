@@ -10,6 +10,7 @@
 - ✅ **HTTP API**: FastAPI提供RESTful接口
 - ✅ **会话管理**: 支持多用户多会话，独立存储对话历史
 - ✅ **异步处理**: 全异步架构，高性能
+- ⭐ **上下文压缩**: 支持3种压缩策略（滑动窗口、Token计数、智能摘要），防止token超限
 
 ## 项目结构
 
@@ -53,11 +54,18 @@ cp .env.example .env
 ```
 
 编辑 `.env` 文件：
-```
+```bash
+# API配置
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_BASE_URL=https://api.openai.com/v1
 MODEL_NAME=gpt-4o-mini
+
+# 上下文压缩策略（可选）
+CONTEXT_COMPRESSION_STRATEGY=sliding_window  # none | sliding_window | token_limit | summary
+COMPRESSION_WINDOW_SIZE=10  # 滑动窗口保留的对话轮数
 ```
+
+> 💡 **上下文压缩**：长对话会导致token超限和成本暴涨。推荐使用 `sliding_window` 策略。详见 [doc/COMPRESSION_USAGE.md](doc/COMPRESSION_USAGE.md)
 
 ### 3. 启动服务
 
@@ -169,6 +177,35 @@ class State(TypedDict):
 
 使用 `add_messages` 自动累积消息历史
 
+### 5. 上下文压缩策略 ⭐
+
+**问题**：长对话会导致token超限、成本暴涨、响应变慢
+
+**解决方案**：3种压缩策略可选
+
+| 策略 | 适用场景 | Token消耗 | 信息保留 |
+|------|---------|-----------|---------|
+| **none** | 短对话、测试 | 无限增长 | 100% |
+| **sliding_window** | 客服、问答（推荐）| 固定 | 70% |
+| **token_limit** | 代码助手 | 精确控制 | 75% |
+| **summary** | 项目管理、咨询 | 大幅减少 | 90% |
+
+**快速开始**：
+
+```bash
+# .env 中配置
+CONTEXT_COMPRESSION_STRATEGY=sliding_window
+COMPRESSION_WINDOW_SIZE=10  # 保留最近10轮对话
+```
+
+启动后会看到压缩效果：
+```
+🔄 [滑动窗口] 压缩: 30 → 20 条消息
+```
+
+> 详细文档：[doc/COMPRESSION_USAGE.md](doc/COMPRESSION_USAGE.md)  
+> 技术原理：[doc/CONTEXT_COMPRESSION.md](doc/CONTEXT_COMPRESSION.md)
+
 ## 示例对话
 
 ```python
@@ -206,12 +243,22 @@ POST /chat
 
 ## 📚 详细文档
 
+### 存储相关
 - [存储位置说明](doc/STORAGE.md) - session_id上下文存储在哪里
 - [存储方案对比](doc/STORAGE_OPTIONS.md) - 所有持久化存储方案详解
 - [快速切换指南](doc/STORAGE_COMPARISON.md) - 三种存储方案对比
 - [SQLite使用指南](doc/SWITCHED_TO_SQLITE.md) - 当前使用的SQLite配置
 - [PostgreSQL部署](doc/POSTGRES_SETUP.md) - 生产环境PostgreSQL配置
 - [数据库查询API](doc/DATABASE_QUERY_API.md) - 查询SQLite数据的接口文档
+
+### 上下文压缩 ⭐
+- [压缩使用指南](doc/COMPRESSION_USAGE.md) - **推荐阅读**，配置和使用3种压缩策略
+- [压缩技术详解](doc/CONTEXT_COMPRESSION.md) - 深入理解压缩原理和方案对比
+- [Checkpoint机制](doc/CHECKPOINT_MECHANISM.md) - LangGraph自动保存机制详解
+
+### 开发指南
+- [踩坑记录](doc/PITFALLS.md) - SQLite持久化开发中的7个大坑
+- [快速参考](doc/QUICK_REFERENCE.md) - 常见错误和解决方案
 
 ## 🧪 测试脚本
 
@@ -233,6 +280,11 @@ python demo_session.py
 
 # 存储位置检查
 python check_storage.py
+
+# 上下文压缩测试 ⭐
+python examples/test_compression.py --strategy all          # 对比所有策略
+python examples/test_compression.py --strategy sliding_window  # 测试滑动窗口
+python examples/test_compression.py --long                  # 测试超长对话（50轮）
 ```
 
 ## License
