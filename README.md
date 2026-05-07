@@ -15,13 +15,25 @@
 
 ```
 LangChainProject/
-├── main.py              # FastAPI HTTP服务
-├── agent.py             # LangChain Agent核心逻辑
-├── requirements.txt     # 项目依赖
-├── .env                 # 环境变量（需要自己创建）
-├── .env.example         # 环境变量示例
-├── checkpoints/         # Checkpoint数据库目录（自动创建）
-└── README.md            # 项目文档
+├── main.py                  # FastAPI HTTP服务
+├── agent.py                 # LangChain Agent（MemorySaver版本）
+├── agent_persistent.py      # SQLite持久化版本（当前使用）
+├── agent_postgres.py        # PostgreSQL版本（生产环境）
+├── requirements.txt         # 项目依赖
+├── .env                     # 环境变量（需要自己创建）
+├── .env.example             # 环境变量示例
+├── checkpoints/             # Checkpoint数据库目录（自动创建）
+├── doc/                     # 文档目录
+│   ├── STORAGE.md           # 存储位置详细说明
+│   ├── STORAGE_OPTIONS.md   # 所有存储方案对比
+│   ├── STORAGE_COMPARISON.md # 快速对比和切换指南
+│   ├── SWITCHED_TO_SQLITE.md # SQLite切换指南
+│   ├── POSTGRES_SETUP.md    # PostgreSQL部署指南
+│   └── DATABASE_QUERY_API.md # 数据库查询接口文档
+├── test_agent.py            # 基础测试脚本
+├── test_persistence.py      # 持久化测试
+├── test_query_database.py   # 数据库查询测试
+└── README.md                # 项目文档（本文件）
 ```
 
 ## 快速开始
@@ -106,6 +118,24 @@ curl -X DELETE "http://localhost:8000/history/user_123"
 curl "http://localhost:8000/health"
 ```
 
+### 5. 查询所有会话
+
+**GET** `/sessions`
+
+```bash
+curl "http://localhost:8000/sessions"
+```
+
+### 6. 数据库统计信息
+
+**GET** `/database/stats`
+
+```bash
+curl "http://localhost:8000/database/stats"
+```
+
+> 更多接口详情请查看：[doc/DATABASE_QUERY_API.md](doc/DATABASE_QUERY_API.md)
+
 ## 核心技术说明
 
 ### 1. LangChain组件使用
@@ -170,8 +200,40 @@ POST /chat
 
 - Checkpoint数据库文件存储在 `checkpoints/` 目录
 - 不同session_id的对话完全隔离
+- 当前使用SQLite持久化存储（重启后数据保留）
 - 生产环境建议使用PostgreSQL或Redis作为checkpoint后端
 - 记得保护好你的API密钥
+
+## 📚 详细文档
+
+- [存储位置说明](doc/STORAGE.md) - session_id上下文存储在哪里
+- [存储方案对比](doc/STORAGE_OPTIONS.md) - 所有持久化存储方案详解
+- [快速切换指南](doc/STORAGE_COMPARISON.md) - 三种存储方案对比
+- [SQLite使用指南](doc/SWITCHED_TO_SQLITE.md) - 当前使用的SQLite配置
+- [PostgreSQL部署](doc/POSTGRES_SETUP.md) - 生产环境PostgreSQL配置
+- [数据库查询API](doc/DATABASE_QUERY_API.md) - 查询SQLite数据的接口文档
+
+## 🧪 测试脚本
+
+```bash
+# 基础对话测试
+python test_agent.py
+
+# 持久化功能测试
+python test_persistence.py
+
+# 验证重启后数据保留
+python test_persistence_verify.py
+
+# 数据库查询接口测试
+python test_query_database.py
+
+# 会话隔离演示
+python demo_session.py
+
+# 存储位置检查
+python check_storage.py
+```
 
 ## License
 

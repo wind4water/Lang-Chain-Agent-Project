@@ -6,13 +6,13 @@ from typing import Annotated
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 import os
-import sqlite3
+import aiosqlite
 
 
 class State(TypedDict):
@@ -46,30 +46,78 @@ class ConversationAgentWithPersistence:
         # 创建Chain
         self.chain = self.prompt | self.llm | StrOutputParser()
 
-        # 使用SqliteSaver - 持久化到磁盘
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
-        # 创建数据库连接
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-
-        # 使用同步版本的SqliteSaver
-        self.checkpointer = SqliteSaver(conn)
-
         # 保存数据库路径
         self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-        # 构建StateGraph
-        self.graph = self._build_graph()
+        # checkpointer 将在首次使用时异步初始化
+        self._conn = None
+        self.checkpointer = None
+        self.graph = None
 
-        print(f"✅ 使用持久化存储：{os.path.abspath(db_path)}")
+        print(f"✅ 配置持久化存储：{os.path.abspath(db_path)}")
 
-    def _build_graph(self):
-        """构建对话图"""
-        workflow = StateGraph(State)
-        workflow.add_node("chat", self._chat_node)
-        workflow.add_edge(START, "chat")
-        workflow.add_edge("chat", END)
-        return workflow.compile(checkpointer=self.checkpointer)
+    async def _ensure_initialized(self):
+        """确保checkpointer和graph已初始化"""
+        if self.graph is None:
+            # 直接创建 aiosqlite 连接
+            self._conn = await aiosqlite.connect(self.db_path)
+
+            # 使用连接创建 AsyncSqliteSaver
+            self.checkpointer = AsyncSqliteSaver(self._conn)
+
+            # 初始化数据库表（手动创建）
+            await self._init_tables()
+
+            # 构建StateGraph
+            workflow = StateGraph(State)
+            workflow.add_node("chat", self._chat_node)
+            workflow.add_edge(START, "chat")
+            workflow.add_edge("chat", END)
+
+            self.graph = workflow.compile(checkpointer=self.checkpointer)
+            print(f"✅ AsyncSqliteSaver初始化完成")
+
+    async def _init_tables(self):
+        """初始化数据库表"""
+        cursor = await self._conn.cursor()
+
+        # 创建 checkpoints 表
+        await cursor.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                type TEXT,
+                checkpoint BLOB,
+                metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            )
+        """)
+
+        await cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_thread_id
+            ON checkpoints(thread_id)
+        """)
+
+        # 创建 checkpoint_writes 表
+        await cursor.execute("""
+            CREATE TABLE IF NOT EXISTS checkpoint_writes (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                channel TEXT NOT NULL,
+                type TEXT,
+                value BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+            )
+        """)
+
+        await self._conn.commit()
+        print(f"✅ 数据库表已初始化")
 
     def _chat_node(self, state: State):
         """对话节点"""
@@ -79,6 +127,9 @@ class ConversationAgentWithPersistence:
 
     async def chat(self, message: str, session_id: str) -> str:
         """处理用户消息"""
+        # 确保已初始化
+        await self._ensure_initialized()
+
         config = {"configurable": {"thread_id": session_id}}
         user_message = HumanMessage(content=message)
         result = await self.graph.ainvoke(
@@ -89,6 +140,9 @@ class ConversationAgentWithPersistence:
 
     async def get_history(self, session_id: str) -> list:
         """获取会话历史"""
+        # 确保已初始化
+        await self._ensure_initialized()
+
         config = {"configurable": {"thread_id": session_id}}
         state = await self.graph.aget_state(config)
 
@@ -104,133 +158,124 @@ class ConversationAgentWithPersistence:
 
     async def clear_history(self, session_id: str):
         """清除会话历史"""
+        # 确保已初始化
+        await self._ensure_initialized()
+
         config = {"configurable": {"thread_id": session_id}}
         await self.graph.aupdate_state(config, {"messages": []})
 
-    def list_all_sessions(self):
+    async def list_all_sessions(self):
         """列出所有session_id（仅SQLite支持）"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute("""
+                    SELECT DISTINCT thread_id
+                    FROM checkpoints
+                    WHERE thread_id IS NOT NULL AND thread_id != ''
+                """)
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
+            except Exception as e:
+                print(f"Error in list_all_sessions: {e}")
+                return []
 
-        # 查询checkpoints表中的所有thread_id
-        try:
-            cursor.execute("""
-                SELECT DISTINCT json_extract(checkpoint, '$.configurable.thread_id') as thread_id
-                FROM checkpoints
-                WHERE thread_id IS NOT NULL
-            """)
-            sessions = [row[0] for row in cursor.fetchall()]
-            conn.close()
-            return sessions
-        except Exception as e:
-            conn.close()
-            return []
-
-    def get_database_stats(self):
+    async def get_database_stats(self):
         """获取数据库统计信息"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                # 获取总checkpoint数
+                await cursor.execute("SELECT COUNT(*) FROM checkpoints")
+                row = await cursor.fetchone()
+                total_checkpoints = row[0] if row else 0
 
-        try:
-            # 获取总checkpoint数
-            cursor.execute("SELECT COUNT(*) FROM checkpoints")
-            total_checkpoints = cursor.fetchone()[0]
+                # 获取唯一session数
+                await cursor.execute("""
+                    SELECT COUNT(DISTINCT thread_id)
+                    FROM checkpoints
+                    WHERE thread_id IS NOT NULL AND thread_id != ''
+                """)
+                row = await cursor.fetchone()
+                total_sessions = row[0] if row else 0
 
-            # 获取唯一session数
-            cursor.execute("""
-                SELECT COUNT(DISTINCT json_extract(checkpoint, '$.configurable.thread_id'))
-                FROM checkpoints
-            """)
-            total_sessions = cursor.fetchone()[0]
+                # 获取数据库文件大小
+                db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
 
-            # 获取数据库文件大小
-            db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
+                # 获取每个session的详细信息
+                await cursor.execute("""
+                    SELECT
+                        thread_id,
+                        COUNT(*) as checkpoint_count
+                    FROM checkpoints
+                    WHERE thread_id IS NOT NULL AND thread_id != ''
+                    GROUP BY thread_id
+                    ORDER BY checkpoint_count DESC
+                """)
+                rows = await cursor.fetchall()
 
-            # 获取每个session的详细信息
-            cursor.execute("""
-                SELECT
-                    json_extract(checkpoint, '$.configurable.thread_id') as thread_id,
-                    COUNT(*) as checkpoint_count,
-                    MIN(thread_ts) as first_seen,
-                    MAX(thread_ts) as last_seen
-                FROM checkpoints
-                WHERE thread_id IS NOT NULL
-                GROUP BY thread_id
-                ORDER BY last_seen DESC
-            """)
+                sessions_detail = []
+                for row in rows:
+                    sessions_detail.append({
+                        "session_id": row[0],
+                        "checkpoint_count": row[1]
+                    })
 
-            sessions_detail = []
-            for row in cursor.fetchall():
-                sessions_detail.append({
-                    "session_id": row[0],
-                    "checkpoint_count": row[1],
-                    "first_seen": row[2],
-                    "last_seen": row[3]
-                })
+                return {
+                    "total_sessions": total_sessions,
+                    "total_checkpoints": total_checkpoints,
+                    "database_size_bytes": db_size,
+                    "database_size_mb": round(db_size / 1024 / 1024, 2),
+                    "database_path": os.path.abspath(self.db_path),
+                    "sessions": sessions_detail
+                }
 
-            conn.close()
+            except Exception as e:
+                return {
+                    "error": str(e),
+                    "total_sessions": 0,
+                    "total_checkpoints": 0,
+                    "database_size_bytes": 0,
+                    "database_size_mb": 0,
+                    "database_path": os.path.abspath(self.db_path),
+                    "sessions": []
+                }
 
-            return {
-                "total_sessions": total_sessions,
-                "total_checkpoints": total_checkpoints,
-                "database_size_bytes": db_size,
-                "database_size_mb": round(db_size / 1024 / 1024, 2),
-                "database_path": os.path.abspath(self.db_path),
-                "sessions": sessions_detail
-            }
-
-        except Exception as e:
-            conn.close()
-            return {
-                "error": str(e),
-                "total_sessions": 0,
-                "total_checkpoints": 0,
-                "database_size_bytes": 0,
-                "database_size_mb": 0,
-                "database_path": os.path.abspath(self.db_path),
-                "sessions": []
-            }
-
-    def get_session_detail(self, session_id: str):
+    async def get_session_detail(self, session_id: str):
         """获取指定session的详细信息"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                # 获取session的checkpoint信息
+                await cursor.execute("""
+                    SELECT
+                        checkpoint_id,
+                        parent_checkpoint_id,
+                        checkpoint
+                    FROM checkpoints
+                    WHERE thread_id = ?
+                    ORDER BY checkpoint_id DESC
+                """, (session_id,))
 
-        try:
-            # 获取session的checkpoint信息
-            cursor.execute("""
-                SELECT
-                    checkpoint_id,
-                    parent_checkpoint_id,
-                    thread_ts,
-                    checkpoint
-                FROM checkpoints
-                WHERE json_extract(checkpoint, '$.configurable.thread_id') = ?
-                ORDER BY thread_ts DESC
-            """, (session_id,))
+                rows = await cursor.fetchall()
+                checkpoints = []
+                for row in rows:
+                    checkpoints.append({
+                        "checkpoint_id": row[0],
+                        "parent_checkpoint_id": row[1],
+                        "has_data": row[2] is not None
+                    })
 
-            checkpoints = []
-            for row in cursor.fetchall():
-                checkpoints.append({
-                    "checkpoint_id": row[0],
-                    "parent_checkpoint_id": row[1],
-                    "timestamp": row[2],
-                    "has_data": row[3] is not None
-                })
+                return {
+                    "session_id": session_id,
+                    "checkpoint_count": len(checkpoints),
+                    "checkpoints": checkpoints
+                }
 
-            conn.close()
-
-            return {
-                "session_id": session_id,
-                "checkpoint_count": len(checkpoints),
-                "checkpoints": checkpoints
-            }
-
-        except Exception as e:
-            conn.close()
-            return {
-                "session_id": session_id,
-                "error": str(e),
-                "checkpoint_count": 0,
-                "checkpoints": []
-            }
+            except Exception as e:
+                return {
+                    "session_id": session_id,
+                    "error": str(e),
+                    "checkpoint_count": 0,
+                    "checkpoints": []
+                }

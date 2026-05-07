@@ -135,7 +135,7 @@ async def list_sessions():
     返回数据库中所有的session_id列表
     """
     try:
-        sessions = agent.list_all_sessions()
+        sessions = await agent.list_all_sessions()
         return {
             "total": len(sessions),
             "sessions": sessions
@@ -156,7 +156,7 @@ async def get_database_stats():
     - 每个会话的详细信息
     """
     try:
-        stats = agent.get_database_stats()
+        stats = await agent.get_database_stats()
         return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取数据库统计信息时出错: {str(e)}")
@@ -172,7 +172,7 @@ async def get_session_detail(session_id: str):
     返回该会话的所有checkpoint详细信息
     """
     try:
-        detail = agent.get_session_detail(session_id)
+        detail = await agent.get_session_detail(session_id)
         return detail
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取会话详细信息时出错: {str(e)}")
