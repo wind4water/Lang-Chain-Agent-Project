@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global agent
     # 启动时初始化Agent（SQLite持久化版本）
-    agent = ConversationAgentWithPersistence()
+    agent = SqliteAgent()
     print("✅ LangChain Agent initialized with SQLite checkpoint support")
     yield
     # 关闭时清理（如果需要）
