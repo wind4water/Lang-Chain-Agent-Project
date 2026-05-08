@@ -1,9 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
-from app.agents.sqlite import SqliteAgent
+from app.agents.sqlite_with_tools import SqliteAgentWithTools
 from dotenv import load_dotenv
 import uvicorn
+import os
 
 
 # 加载环境变量
@@ -17,9 +18,11 @@ agent = None
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global agent
-    # 启动时初始化Agent（SQLite持久化版本）
-    agent = SqliteAgent()
-    print("✅ LangChain Agent initialized with SQLite checkpoint support")
+    # 启动时初始化Agent（支持工具调用的SQLite版本）
+    # 可以通过环境变量控制是否启用工具
+    enable_tools = os.getenv("ENABLE_TOOLS", "true").lower() == "true"
+    agent = SqliteAgentWithTools(enable_tools=enable_tools)
+    print("✅ LangChain Agent initialized with Tool Calling + SQLite checkpoint support")
     yield
     # 关闭时清理（如果需要）
     print("🔄 Shutting down...")
@@ -54,8 +57,14 @@ class HistoryResponse(BaseModel):
 async def root():
     """根路径"""
     return {
-        "message": "LangChain对话Agent API",
+        "message": "LangChain对话Agent API (with Tool Calling)",
         "storage": "SQLite Persistent Storage",
+        "features": [
+            "Tool Calling - 自动调用工具完成任务",
+            "Context Compression - 上下文压缩",
+            "Persistent Storage - SQLite 持久化",
+            "Multi-Session - 多会话管理"
+        ],
         "endpoints": {
             "POST /chat": "发送消息进行对话",
             "GET /history/{session_id}": "获取会话历史",
@@ -63,6 +72,7 @@ async def root():
             "GET /sessions": "查看所有会话列表",
             "GET /database/stats": "查看数据库统计信息",
             "GET /database/sessions/{session_id}": "查看指定会话的详细信息",
+            "GET /tools": "查看所有可用工具",
             "GET /health": "健康检查"
         }
     }
@@ -123,8 +133,38 @@ async def health():
     return {
         "status": "healthy",
         "agent_initialized": agent is not None,
-        "storage_type": "SQLite"
+        "storage_type": "SQLite",
+        "tools_enabled": agent.enable_tools if agent else False,
+        "tools_count": len(agent.tools) if agent else 0
     }
+
+
+@app.get("/tools")
+async def list_tools():
+    """
+    列出所有可用的工具
+
+    返回系统中注册的所有工具及其描述
+    """
+    try:
+        if agent is None:
+            raise HTTPException(status_code=500, detail="Agent 未初始化")
+
+        if not agent.enable_tools:
+            return {
+                "enabled": False,
+                "message": "工具系统未启用",
+                "tools": []
+            }
+
+        tools = agent.list_available_tools()
+        return {
+            "enabled": True,
+            "total": len(tools),
+            "tools": tools
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取工具列表时出错: {str(e)}")
 
 
 @app.get("/sessions")
