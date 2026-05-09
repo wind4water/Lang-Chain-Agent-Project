@@ -25,95 +25,19 @@ from app.tools.loader import load_all_tools
 # ============ Langfuse 集成 ============
 from typing import Optional
 import logging
-import warnings
 
 # 条件导入 Langfuse（不强制依赖）
 try:
-    from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
+    from langfuse import Langfuse
     LANGFUSE_AVAILABLE = True
-
-    # 创建一个安全的包装器，捕获回调中的错误
-    class SafeLangfuseCallbackHandler(LangfuseCallbackHandler):
-        """安全的 Langfuse 回调处理器，忽略内部错误"""
-
-        def _handle_error(self, error: Exception, method_name: str):
-            """统一的错误处理"""
-            # 忽略已知的无害错误
-            error_msg = str(error)
-            if any(msg in error_msg for msg in [
-                "'NoneType' object has no attribute 'get'",
-                "run not found",
-                "parent run not found"
-            ]):
-                # 这些错误不影响功能，静默忽略
-                logger.debug(f"Langfuse {method_name} 遇到已知错误（已忽略）: {error_msg}")
-            else:
-                # 其他错误记录但不抛出
-                logger.warning(f"Langfuse {method_name} 错误: {error}", exc_info=False)
-
-        def __generate_trace_and_parent(self, *args, **kwargs):
-            try:
-                return super().__generate_trace_and_parent(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "__generate_trace_and_parent")
-                return None, None
-
-        def on_chain_start(self, *args, **kwargs):
-            try:
-                return super().on_chain_start(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "on_chain_start")
-
-        def on_chain_end(self, *args, **kwargs):
-            try:
-                return super().on_chain_end(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "on_chain_end")
-
-        def on_tool_start(self, *args, **kwargs):
-            try:
-                return super().on_tool_start(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "on_tool_start")
-
-        def on_tool_end(self, *args, **kwargs):
-            try:
-                return super().on_tool_end(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "on_tool_end")
-
-        def on_llm_start(self, *args, **kwargs):
-            try:
-                return super().on_llm_start(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "on_llm_start")
-
-        def on_llm_end(self, *args, **kwargs):
-            try:
-                return super().on_llm_end(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "on_llm_end")
-
-        def on_chat_model_start(self, *args, **kwargs):
-            try:
-                return super().on_chat_model_start(*args, **kwargs)
-            except Exception as e:
-                self._handle_error(e, "on_chat_model_start")
-
 except ImportError:
     LANGFUSE_AVAILABLE = False
-    LangfuseCallbackHandler = None
-    SafeLangfuseCallbackHandler = None
+    Langfuse = None
 
 logger = logging.getLogger(__name__)
 
-# 抑制 Langfuse 内部错误的日志输出（这些错误不影响功能）
+# 抑制 Langfuse 内部错误的日志输出
 logging.getLogger("langfuse").setLevel(logging.ERROR)
-
-# 过滤 Langfuse callback 中的特定警告
-warnings.filterwarnings("ignore", message=".*'NoneType' object has no attribute 'get'.*")
-warnings.filterwarnings("ignore", message=".*run not found.*")
-warnings.filterwarnings("ignore", message=".*parent run not found.*")
 # ========================================
 
 
@@ -141,7 +65,7 @@ class SqliteAgentWithTools:
 
         # ============ Langfuse 配置和初始化 ============
         self.langfuse_enabled = False
-        self.langfuse_handler = None
+        self.langfuse_client = None
         self.langfuse_public_key = None
         self.langfuse_secret_key = None
         self.langfuse_host = None
@@ -164,31 +88,28 @@ class SqliteAgentWithTools:
                         logger.warning("⚠️ Langfuse 配置为示例值，请更新为真实密钥")
                         print("⚠️ Langfuse 配置为示例值，监控功能已禁用")
                     else:
-                        # 保存配置（用于创建新的 callback）
+                        # 保存配置
                         self.langfuse_public_key = public_key
                         self.langfuse_secret_key = secret_key
                         self.langfuse_host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 
-                        # 使用安全的包装器初始化 Langfuse Handler
-                        self.langfuse_handler = SafeLangfuseCallbackHandler(
+                        # 初始化 Langfuse 客户端 (v2.x API)
+                        self.langfuse_client = Langfuse(
                             public_key=public_key,
                             secret_key=secret_key,
                             host=self.langfuse_host,
-                            flush_at=int(os.getenv("LANGFUSE_FLUSH_AT", "15")),
-                            flush_interval=float(os.getenv("LANGFUSE_FLUSH_INTERVAL", "1.0")),
                         )
                         self.langfuse_enabled = True
                         self.langfuse_sample_rate = float(os.getenv("LANGFUSE_SAMPLE_RATE", "1.0"))
-                        self.langfuse_trace_tools = os.getenv("LANGFUSE_TRACE_TOOL_DETAILS", "true").lower() == "true"
 
-                        logger.info("✅ Langfuse 监控已启用（使用安全包装器）")
+                        logger.info("✅ Langfuse 监控已启用")
                         print(f"✅ Langfuse 监控已启用 (采样率: {self.langfuse_sample_rate*100:.0f}%)")
 
                 except Exception as e:
                     logger.error(f"⚠️ Langfuse 初始化失败: {e}")
                     print(f"⚠️ Langfuse 初始化失败: {e}")
                     self.langfuse_enabled = False
-                    self.langfuse_handler = None
+                    self.langfuse_client = None
         else:
             logger.info("ℹ️ Langfuse 监控未启用")
         # =============================================
@@ -234,50 +155,37 @@ class SqliteAgentWithTools:
     def _create_langfuse_callback(self, session_id: str, user_message: str = None):
         """返回 Langfuse callback handler
 
+        Langfuse 2.x 使用 OpenTelemetry 集成，不再使用 CallbackHandler。
+        这里返回 None，追踪通过手动方式在 chat 方法中处理。
+
         Args:
             session_id: 会话ID
             user_message: 用户消息
 
         Returns:
-            Langfuse callback handler 或 None
+            None (Langfuse 2.x 不使用 callback handler)
         """
-        if not self.langfuse_enabled:
-            logger.debug("Langfuse callback 未创建: langfuse_enabled=%s", self.langfuse_enabled)
+        if not self.langfuse_enabled or not self.langfuse_client:
             return None
 
         # 采样控制
         import random
         sample = random.random()
         if sample > self.langfuse_sample_rate:
-            logger.debug("Langfuse callback 跳过（采样）: sample=%.2f, rate=%.2f",
-                        sample, self.langfuse_sample_rate)
             return None
 
-        try:
-            # 🔥 关键修复：每次请求创建新的 handler 实例，避免状态混乱
-            handler = SafeLangfuseCallbackHandler(
-                public_key=self.langfuse_public_key,
-                secret_key=self.langfuse_secret_key,
-                host=self.langfuse_host,
-                flush_at=int(os.getenv("LANGFUSE_FLUSH_AT", "15")),
-                flush_interval=float(os.getenv("LANGFUSE_FLUSH_INTERVAL", "1.0")),
-                # 添加 session 和 user 标识
-                session_id=session_id,
-            )
+        # 记录追踪信息
+        trace_name = f"chat_{session_id}"
+        if user_message:
+            preview = user_message[:50] + "..." if len(user_message) > 50 else user_message
+            trace_name = preview
 
-            # 记录追踪信息
-            trace_name = f"chat_{session_id}"
-            if user_message:
-                preview = user_message[:50] + "..." if len(user_message) > 50 else user_message
-                trace_name = preview
+        logger.info("🔵 Langfuse 追踪: session_id=%s, trace_name=%s",
+                   session_id, trace_name)
 
-            logger.info("🔵 Langfuse 追踪: session_id=%s, trace_name=%s",
-                       session_id, trace_name)
-
-            return handler
-        except Exception as e:
-            logger.error("❌ 创建 Langfuse callback 失败: %s", e, exc_info=True)
-            return None
+        # Langfuse 2.x 不使用 callback handler，返回 None
+        # 追踪在 chat 方法中通过 langfuse_client 手动处理
+        return None
 
     async def _ensure_initialized(self):
         """确保checkpointer和graph已初始化"""
@@ -438,28 +346,38 @@ class SqliteAgentWithTools:
         """处理用户消息（包含Token统计和Langfuse追踪）"""
         await self._ensure_initialized()
 
-        # ============ Langfuse: 创建 callback ============
-        langfuse_callback = self._create_langfuse_callback(session_id, message)
-        callbacks = [langfuse_callback] if langfuse_callback else []
-
-        if langfuse_callback:
-            logger.info("🟢 Langfuse callback 已添加到 config")
-        else:
-            logger.debug("⚪ Langfuse callback 未创建，跳过追踪")
+        # ============ Langfuse 2.x: 手动追踪 ============
+        observation = None
+        if self.langfuse_enabled and self.langfuse_client:
+            import random
+            if random.random() <= self.langfuse_sample_rate:
+                try:
+                    trace_name = message[:50] + "..." if len(message) > 50 else message
+                    observation = self.langfuse_client.start_observation(
+                        name=trace_name,
+                        as_type="generation",
+                        model=self.llm.model_name,
+                        input={"message": message},
+                        metadata={
+                            "session_id": session_id,
+                            "enable_tools": self.enable_tools,
+                        },
+                    )
+                    logger.info("🟢 Langfuse generation 已创建")
+                except Exception as e:
+                    logger.warning(f"Langfuse generation 创建失败: {e}")
         # ===============================================
 
         config = {
             "configurable": {"thread_id": session_id},
-            "callbacks": callbacks,  # 传递 callbacks
         }
         user_message = HumanMessage(content=message)
 
-        # 记录请求开始时间（用于后续分析）
+        # 记录请求开始时间
         import time
         start_time = time.time()
 
-        logger.info("📤 开始调用 LangGraph: session_id=%s, callbacks_count=%d",
-                   session_id, len(callbacks))
+        logger.info("📤 开始调用 LangGraph: session_id=%s", session_id)
 
         result = await self.graph.ainvoke(
             {"messages": [user_message]},
@@ -488,11 +406,9 @@ class SqliteAgentWithTools:
 
         # 如果无法从metadata中获取，则进行简单估算
         if prompt_tokens == 0 and completion_tokens == 0:
-            # 粗略估算：英文 ~4字符/token，中文 ~1.5-2字符/token
-            # 这里用一个保守的估算
-            prompt_tokens = len(message) // 3  # 估算用户输入
+            prompt_tokens = len(message) // 3
             if ai_message:
-                completion_tokens = len(ai_message.content) // 3  # 估算AI输出
+                completion_tokens = len(ai_message.content) // 3
 
         # 保存Token使用记录
         if prompt_tokens > 0 or completion_tokens > 0:
@@ -504,17 +420,23 @@ class SqliteAgentWithTools:
                     model_name=self.llm.model_name
                 )
             except Exception as e:
-                # Token统计失败不应该影响对话
                 print(f"⚠️ Token统计保存失败: {e}")
 
-        # ============ Langfuse: flush 数据 ============
-        if langfuse_callback:
+        # ============ Langfuse 2.x: 结束追踪 ============
+        if observation:
             try:
-                logger.info("🔄 开始 flush Langfuse 数据...")
-                langfuse_callback.flush()
-                logger.info("✅ Langfuse 数据 flush 完成")
+                response_text = ai_message.content if ai_message else ""
+                observation.update(
+                    output={"response": response_text},
+                    usage_details={
+                        "input": prompt_tokens,
+                        "output": completion_tokens,
+                    } if prompt_tokens > 0 or completion_tokens > 0 else None,
+                )
+                observation.end()
+                logger.info("✅ Langfuse generation 已完成")
             except Exception as e:
-                logger.error("❌ Langfuse flush 失败: %s", e, exc_info=True)
+                logger.warning(f"Langfuse generation 结束失败: {e}")
         # ============================================
 
         # 返回最后一条 AI 消息
@@ -921,19 +843,27 @@ class SqliteAgentWithTools:
         """
         await self._ensure_initialized()
 
-        # ============ Langfuse: 创建 callback ============
-        langfuse_callback = self._create_langfuse_callback(session_id, message)
-        callbacks = [langfuse_callback] if langfuse_callback else []
-
-        if langfuse_callback:
-            logger.info("🟢 Langfuse callback 已添加到流式 config")
-        else:
-            logger.debug("⚪ Langfuse callback 未创建（流式），跳过追踪")
+        # ============ Langfuse 2.x: 手动追踪 ============
+        observation = None
+        if self.langfuse_enabled and self.langfuse_client:
+            import random
+            if random.random() <= self.langfuse_sample_rate:
+                try:
+                    trace_name = message[:50] + "..." if len(message) > 50 else message
+                    observation = self.langfuse_client.start_observation(
+                        name=trace_name,
+                        as_type="generation",
+                        model=self.llm.model_name,
+                        input={"message": message},
+                        metadata={"session_id": session_id, "stream": True},
+                    )
+                    logger.info("🟢 Langfuse generation 已创建（流式）")
+                except Exception as e:
+                    logger.warning(f"Langfuse generation 创建失败: {e}")
         # ===============================================
 
         config = {
             "configurable": {"thread_id": session_id},
-            "callbacks": callbacks,  # 传递 callbacks
         }
         user_message = HumanMessage(content=message)
 
@@ -942,8 +872,7 @@ class SqliteAgentWithTools:
         prompt_tokens = 0
         completion_tokens = 0
 
-        logger.info("📤 开始流式调用 LangGraph: session_id=%s, callbacks_count=%d",
-                   session_id, len(callbacks))
+        logger.info("📤 开始流式调用 LangGraph: session_id=%s", session_id)
 
         try:
             # 使用 astream_events 获取流式事件
@@ -973,7 +902,6 @@ class SqliteAgentWithTools:
 
             # 流式输出完成后，保存Token统计
             if prompt_tokens == 0 and completion_tokens == 0:
-                # 如果没有获取到usage信息，进行估算
                 prompt_tokens = len(message) // 3
                 completion_tokens = len(full_response) // 3
 
@@ -988,28 +916,33 @@ class SqliteAgentWithTools:
                 except Exception as e:
                     print(f"⚠️ Token统计保存失败: {e}")
 
-            # ============ Langfuse: flush 数据 ============
-            if langfuse_callback:
+            # ============ Langfuse 2.x: 结束追踪 ============
+            if observation:
                 try:
-                    logger.info("🔄 开始 flush Langfuse 数据（流式）...")
-                    langfuse_callback.flush()
-                    logger.info("✅ Langfuse 数据 flush 完成（流式）")
+                    observation.update(
+                        output={"response": full_response},
+                        usage_details={
+                            "input": prompt_tokens,
+                            "output": completion_tokens,
+                        } if prompt_tokens > 0 or completion_tokens > 0 else None,
+                    )
+                    observation.end()
+                    logger.info("✅ Langfuse generation 已完成（流式）")
                 except Exception as e:
-                    logger.error("❌ Langfuse flush 失败（流式）: %s", e, exc_info=True)
+                    logger.warning(f"Langfuse generation 结束失败: {e}")
             # ============================================
 
         except Exception as e:
             # 流式输出过程中的错误
             yield f"\n\n[错误: {str(e)}]"
 
-            # ============ Langfuse: 错误时也 flush ============
-            if langfuse_callback:
+            # ============ Langfuse: 错误时更新 observation ============
+            if observation:
                 try:
-                    logger.info("🔄 错误后 flush Langfuse 数据...")
-                    langfuse_callback.flush()
-                    logger.info("✅ 错误后 flush 完成")
-                except Exception as flush_err:
-                    logger.error("❌ 错误后 flush 失败: %s", flush_err)
+                    observation.update(output={"error": str(e)})
+                    observation.end()
+                except Exception:
+                    pass
             # ===============================================
 
 

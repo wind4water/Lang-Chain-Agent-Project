@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from app.agents.sqlite_with_tools import SqliteAgentWithTools
+from app.rag import rag_system  # RAG 系统
 from dotenv import load_dotenv
 import uvicorn
 import os
@@ -25,6 +26,14 @@ async def lifespan(app: FastAPI):
     enable_tools = os.getenv("ENABLE_TOOLS", "true").lower() == "true"
     agent = SqliteAgentWithTools(enable_tools=enable_tools)
     print("✅ LangChain Agent initialized with Tool Calling + SQLite checkpoint support")
+
+    # 初始化 RAG 系统（如果启用）
+    try:
+        await rag_system.initialize()
+    except Exception as e:
+        print(f"⚠️ RAG 系统初始化失败: {e}")
+        print("   对话功能不受影响，RAG 功能不可用")
+
     yield
     # 关闭时清理（如果需要）
     print("🔄 Shutting down...")
@@ -59,14 +68,15 @@ class HistoryResponse(BaseModel):
 async def root():
     """根路径"""
     return {
-        "message": "LangChain对话Agent API (with Tool Calling)",
+        "message": "LangChain对话Agent API (with Tool Calling + RAG)",
         "storage": "SQLite Persistent Storage",
         "features": [
             "Tool Calling - 自动调用工具完成任务",
             "Context Compression - 上下文压缩",
             "Persistent Storage - SQLite 持久化",
             "Multi-Session - 多会话管理",
-            "Token Statistics - Token使用统计和成本追踪"
+            "Token Statistics - Token使用统计和成本追踪",
+            "RAG - 检索增强生成（知识库问答）"
         ],
         "endpoints": {
             "POST /chat": "发送消息进行对话",
@@ -80,7 +90,10 @@ async def root():
             "GET /stats/tokens/{session_id}": "查看指定会话的Token统计",
             "GET /stats/tokens/daily": "查看每日Token统计",
             "GET /stats/tokens/monthly": "查看每月Token统计",
-            "GET /health": "健康检查"
+            "GET /health": "健康检查",
+            "POST /rag/query": "RAG 知识库问答",
+            "POST /rag/rebuild": "重建知识库",
+            "GET /rag/stats": "RAG 系统统计信息"
         }
     }
 
@@ -320,6 +333,95 @@ async def get_monthly_token_stats(year_month: str = None):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取每月统计时出错: {str(e)}")
 
+
+# ============================================================================
+# RAG 相关接口
+# ============================================================================
+
+class RAGQueryRequest(BaseModel):
+    """RAG 查询请求"""
+    question: str = Field(..., description="用户问题")
+    with_sources: bool = Field(default=True, description="是否返回来源信息")
+
+
+class RAGQueryResponse(BaseModel):
+    """RAG 查询响应"""
+    answer: str = Field(..., description="答案")
+    sources: list = Field(default=[], description="来源列表")
+    source_count: int = Field(default=0, description="来源数量")
+
+
+@app.post("/rag/query")
+async def rag_query(request: RAGQueryRequest):
+    """
+    RAG 知识库问答
+
+    - **question**: 用户问题
+    - **with_sources**: 是否返回来源信息（默认 true）
+
+    返回基于知识库的答案及来源
+    """
+    try:
+        if not rag_system._initialized:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置或查看启动日志"
+            )
+
+        result = await rag_system.query(
+            question=request.question,
+            with_sources=request.with_sources
+        )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"RAG 查询失败: {str(e)}")
+
+
+@app.post("/rag/rebuild")
+async def rag_rebuild():
+    """
+    重建知识库
+
+    重新加载文档目录中的所有文档并重建向量索引
+    """
+    try:
+        if not rag_system._initialized:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置"
+            )
+
+        result = await rag_system.rebuild_knowledge_base()
+        return {
+            "message": "知识库重建完成",
+            **result
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"重建知识库失败: {str(e)}")
+
+
+@app.get("/rag/stats")
+async def rag_stats():
+    """
+    获取 RAG 系统统计信息
+
+    返回：
+    - 系统状态
+    - 文档数量
+    - 配置信息
+    """
+    try:
+        stats = rag_system.get_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取 RAG 统计信息失败: {str(e)}")
 
 
 if __name__ == "__main__":

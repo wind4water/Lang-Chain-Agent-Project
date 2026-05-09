@@ -69,8 +69,10 @@ LangChainProject/
 │       ├── test_langfuse_fixed.py
 │       └── ...
 │
-├── archive/                     # 归档旧代码
-├── checkpoints/                 # 数据库文件（自动创建）
+├── data/                        # 数据目录（自动创建）
+│   ├── documents/               # RAG 文档目录
+│   ├── chroma/                  # 向量数据库
+│   └── checkpoints.db           # SQLite 数据库
 ├── requirements.txt             # 项目依赖
 ├── .env.example                 # 环境变量示例
 └── README.md                    # 项目文档

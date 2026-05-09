@@ -21,5 +21,13 @@ beautifulsoup4==4.12.3     # 网页内容抓取
 requests==2.32.3           # HTTP请求（天气、货币、网页抓取）
 lxml==5.3.0               # HTML解析器（beautifulsoup4的依赖）
 
-# Langfuse 监控（可选）- 使用 1.x 版本以兼容 CallbackHandler API
-langfuse>=1.0.0,<2.0.0
+# Langfuse 监控（可选）- 使用 2.x 版本
+langfuse>=2.0.0
+
+# RAG 相关依赖
+langchain-chroma>=0.1.0       # Chroma 向量存储（LangChain 官方包）
+chromadb>=0.4.22              # 向量数据库核心
+langchain-text-splitters>=0.0.1  # 文本分割
+pypdf>=3.17.0                 # PDF 文档加载
+python-docx>=1.1.0            # Word 文档加载
+unstructured>=0.11.0          # 文档加载器（Markdown等）
