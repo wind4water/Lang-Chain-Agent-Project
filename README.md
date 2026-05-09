@@ -10,8 +10,11 @@
 - ✅ **HTTP API**: FastAPI提供RESTful接口
 - ✅ **会话管理**: 支持多用户多会话，独立存储对话历史
 - ✅ **异步处理**: 全异步架构，高性能
-- ⭐ **Tool Calling**: Agent自动判断并调用工具完成任务（日期查询、时间戳等）
+- ⭐ **Tool Calling**: Agent自动判断并调用工具完成任务（日期、搜索、天气、计算器等9个内置工具）
 - ⭐ **上下文压缩**: 支持3种压缩策略（滑动窗口、Token计数、智能摘要），防止token超限
+- ⭐ **流式响应**: 支持SSE流式输出，实时显示AI回复
+- ⭐ **Token统计**: 完整的Token使用统计和成本追踪（按会话、按天、按月）
+- ⭐ **Langfuse监控**: 可选的云端监控和追踪（支持完整的trace追踪）
 
 ## 项目结构
 
@@ -25,27 +28,52 @@ LangChainProject/
 │   │   └── sqlite_with_tools.py # ⭐ SQLite + Tool Calling（当前使用）
 │   ├── tools/                   # ⭐ 工具系统
 │   │   ├── __init__.py          # 工具导出
-│   │   ├── builtin.py           # 内置工具定义（日期、时间戳等）
+│   │   ├── builtin.py           # 内置工具定义
 │   │   └── loader.py            # 工具加载器
 │   └── main.py                  # FastAPI HTTP服务入口
-├── tests/                       # 测试脚本
-│   └── test_tool_calling.py     # ⭐ 工具调用测试
-├── doc/                         # 文档目录
-│   ├── STORAGE.md               # 存储位置详细说明
-│   ├── STORAGE_OPTIONS.md       # 所有存储方案对比
-│   ├── STORAGE_COMPARISON.md    # 快速对比和切换指南
-│   ├── SWITCHED_TO_SQLITE.md    # SQLite切换指南
-│   ├── POSTGRES_SETUP.md        # PostgreSQL部署指南
-│   ├── DATABASE_QUERY_API.md    # 数据库查询接口文档
-│   ├── COMPRESSION_USAGE.md     # 上下文压缩使用指南
-│   ├── CONTEXT_COMPRESSION.md   # 压缩技术详解
-│   ├── TOOL_CALLING.md          # ⭐ 工具调用完整文档
-│   └── TOOL_CALLING_INTRO.md    # 工具调用快速入门
-├── checkpoints/                 # Checkpoint数据库目录（自动创建）
+│
+├── tests/                       # 测试目录
+│   ├── integration/             # 集成测试
+│   │   ├── test_tool_calling.py # 工具调用测试
+│   │   ├── test_persistence.py  # 持久化测试
+│   │   └── ...
+│   ├── unit/                    # 单元测试
+│   │   ├── test_agent.py        # Agent单元测试
+│   │   └── ...
+│   └── demos/                   # 演示脚本
+│       ├── demo_session.py      # 会话隔离演示
+│       ├── test_compression.py  # 压缩策略演示
+│       └── ...
+│
+├── docs/                        # 文档目录
+│   ├── guides/                  # 使用指南
+│   │   ├── tool-calling.md      # 工具调用完整文档
+│   │   ├── compression.md       # 压缩使用指南
+│   │   ├── storage.md           # 存储说明
+│   │   └── ...
+│   ├── api/                     # API文档
+│   │   └── database-query-api.md
+│   ├── troubleshooting/         # 故障排查
+│   │   ├── langfuse-issues.md   # Langfuse问题
+│   │   ├── pitfalls.md          # 开发踩坑
+│   │   └── ...
+│   └── architecture/            # 架构设计
+│       ├── checkpoint-mechanism.md
+│       └── ...
+│
+├── scripts/                     # 工具脚本
+│   ├── dev/                     # 开发工具
+│   │   ├── run.py
+│   │   └── verify_compression.sh
+│   └── test/                    # 测试脚本
+│       ├── test_langfuse_fixed.py
+│       └── ...
+│
+├── archive/                     # 归档旧代码
+├── checkpoints/                 # 数据库文件（自动创建）
 ├── requirements.txt             # 项目依赖
-├── .env                         # 环境变量（需要自己创建）
 ├── .env.example                 # 环境变量示例
-└── README.md                    # 项目文档（本文件）
+└── README.md                    # 项目文档
 ```
 
 ## 快速开始
@@ -87,11 +115,23 @@ ENABLE_TOOLS=true
 # 压缩策略选择: none | sliding_window | token_limit | summary
 CONTEXT_COMPRESSION_STRATEGY=sliding_window  # 推荐使用滑动窗口
 COMPRESSION_WINDOW_SIZE=10  # 滑动窗口保留的对话轮数
+
+# ========================================
+# Langfuse 监控配置（可选）
+# ========================================
+# 是否启用 Langfuse 追踪和监控
+LANGFUSE_ENABLED=false  # 默认禁用，不影响现有功能
+LANGFUSE_PUBLIC_KEY=pk-lf-your-public-key-here
+LANGFUSE_SECRET_KEY=sk-lf-your-secret-key-here
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_SAMPLE_RATE=1.0  # 采样率 0.0-1.0
 ```
 
-> 💡 **工具调用**：启用后Agent可以自动调用工具获取实时信息（如当前时间、日期等）。详见 [doc/TOOL_CALLING.md](doc/TOOL_CALLING.md)
+> 💡 **工具调用**：启用后Agent可以自动调用9个内置工具（日期、搜索、天气、计算器等）。详见 [docs/guides/tool-calling.md](docs/guides/tool-calling.md)
 > 
-> 💡 **上下文压缩**：长对话会导致token超限和成本暴涨。推荐使用 `sliding_window` 策略。详见 [doc/COMPRESSION_USAGE.md](doc/COMPRESSION_USAGE.md)
+> 💡 **上下文压缩**：长对话会导致token超限和成本暴涨。推荐使用 `sliding_window` 策略。详见 [docs/guides/compression.md](docs/guides/compression.md)
+>
+> 💡 **Langfuse 监控**：可选的云端监控和完整trace追踪。需要注册 [Langfuse](https://cloud.langfuse.com) 获取密钥。详见 [docs/troubleshooting/langfuse-issues.md](docs/troubleshooting/langfuse-issues.md)
 
 ### 3. 启动服务
 
@@ -103,13 +143,20 @@ python app/main.py
 
 启动日志示例：
 ```
-🔧 加载了 3 个工具:
+🔧 加载了 9 个工具:
    - get_current_date_tool: 获取当前日期和时间
    - get_current_timestamp: 获取当前 Unix 时间戳
    - get_weekday: 获取今天是星期几
+   - calculator: 安全的数学计算器，支持基本运算
+   - web_search: 使用 DuckDuckGo 进行网络搜索
+   - get_weather: 获取指定城市的天气信息
+   - currency_converter: 货币汇率转换
+   - fetch_url_content: 抓取网页内容
+   - python_executor: 安全的 Python 代码执行器
 ✅ 配置持久化存储: /Users/shenyang/Trip/AIProject/LangChainProject/checkpoints/conversations.db
 ✅ 上下文压缩策略: sliding_window
 ✅ 工具调用: 启用
+✅ Langfuse 监控已启用 (采样率: 100%)  # 如果启用了 Langfuse
 ✅ LangChain Agent initialized with Tool Calling + SQLite checkpoint support
 ```
 
@@ -145,6 +192,22 @@ curl -X POST "http://localhost:8000/chat" \
     "message": "现在几点了？",
     "session_id": "user_123"
   }'
+
+# 搜索信息（Agent会自动调用web_search）
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "帮我搜索 Python 最新版本",
+    "session_id": "user_123"
+  }'
+
+# 查询天气（Agent会自动调用get_weather）
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "北京今天天气怎么样？",
+    "session_id": "user_123"
+  }'
 ```
 
 响应：
@@ -153,6 +216,28 @@ curl -X POST "http://localhost:8000/chat" \
   "response": "现在是 2026年05月08日 14:30:45",
   "session_id": "user_123"
 }
+```
+
+**POST** `/chat/stream` - 流式响应（SSE）⭐
+
+实时逐字输出AI回复，提供更好的用户体验。
+
+```bash
+curl -X POST "http://localhost:8000/chat/stream" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "讲一个故事",
+    "session_id": "user_123"
+  }'
+```
+
+响应格式（Server-Sent Events）：
+```
+data: {"content": "从"}
+data: {"content": "前"}
+data: {"content": "有"}
+...
+data: [DONE]
 ```
 
 ### 2. 查看可用工具 ⭐
@@ -167,7 +252,7 @@ curl "http://localhost:8000/tools"
 ```json
 {
   "enabled": true,
-  "total": 3,
+  "total": 9,
   "tools": [
     {
       "name": "get_current_date_tool",
@@ -180,6 +265,30 @@ curl "http://localhost:8000/tools"
     {
       "name": "get_weekday",
       "description": "获取今天是星期几"
+    },
+    {
+      "name": "calculator",
+      "description": "安全的数学计算器，支持基本运算"
+    },
+    {
+      "name": "web_search",
+      "description": "使用 DuckDuckGo 进行网络搜索"
+    },
+    {
+      "name": "get_weather",
+      "description": "获取指定城市的天气信息"
+    },
+    {
+      "name": "currency_converter",
+      "description": "货币汇率转换"
+    },
+    {
+      "name": "fetch_url_content",
+      "description": "抓取网页内容"
+    },
+    {
+      "name": "python_executor",
+      "description": "安全的 Python 代码执行器"
     }
   ]
 }
@@ -218,7 +327,9 @@ curl "http://localhost:8000/health"
   "agent_initialized": true,
   "storage_type": "SQLite",
   "tools_enabled": true,
-  "tools_count": 3
+  "tools_count": 9,
+  "langfuse_enabled": false,
+  "langfuse_sample_rate": 0.0
 }
 ```
 
@@ -238,7 +349,57 @@ curl "http://localhost:8000/sessions"
 curl "http://localhost:8000/database/stats"
 ```
 
-> 更多接口详情请查看：[doc/DATABASE_QUERY_API.md](doc/DATABASE_QUERY_API.md)
+> 更多接口详情请查看：[docs/api/database-query-api.md](docs/api/database-query-api.md)
+
+### Token 使用统计 ⭐
+
+### 8. 查询会话Token统计
+
+**GET** `/stats/tokens/{session_id}`
+
+查看指定会话的Token消耗和成本。
+
+```bash
+curl "http://localhost:8000/stats/tokens/user_123"
+```
+
+响应示例：
+```json
+{
+  "session_id": "user_123",
+  "request_count": 15,
+  "total_prompt_tokens": 3250,
+  "total_completion_tokens": 1820,
+  "total_tokens": 5070,
+  "total_cost_usd": 0.001521,
+  "by_model": [
+    {
+      "model_name": "gpt-4o-mini",
+      "request_count": 15,
+      "prompt_tokens": 3250,
+      "completion_tokens": 1820,
+      "total_tokens": 5070,
+      "cost_usd": 0.001521
+    }
+  ]
+}
+```
+
+### 9. 每日Token统计
+
+**GET** `/stats/tokens/daily?date=2026-05-09`
+
+```bash
+curl "http://localhost:8000/stats/tokens/daily?date=2026-05-09"
+```
+
+### 10. 每月Token统计
+
+**GET** `/stats/tokens/monthly?year_month=2026-05`
+
+```bash
+curl "http://localhost:8000/stats/tokens/monthly?year_month=2026-05"
+```
 
 ## 核心技术说明
 
@@ -299,8 +460,8 @@ COMPRESSION_WINDOW_SIZE=10  # 保留最近10轮对话
 🔄 [滑动窗口] 压缩: 30 → 20 条消息
 ```
 
-> 详细文档：[doc/COMPRESSION_USAGE.md](doc/COMPRESSION_USAGE.md)  
-> 技术原理：[doc/CONTEXT_COMPRESSION.md](doc/CONTEXT_COMPRESSION.md)
+> 详细文档：[docs/guides/compression.md](docs/guides/compression.md)  
+> 技术原理：[docs/guides/context-compression.md](docs/guides/context-compression.md)
 
 ## 示例对话
 
@@ -353,13 +514,15 @@ POST /chat
 
 ## 扩展建议
 
-1. ~~**添加工具调用**~~: ✅ 已实现！支持日期、时间戳等工具
-2. **扩展工具系统**: 添加更多工具（计算器、搜索、文件操作等）
-3. **流式响应**: 使用SSE实现实时输出
-4. **多模型支持**: 添加其他LLM提供商
-5. **RAG功能**: 集成向量数据库和检索器
-6. **用户认证**: 添加JWT或其他认证机制
-7. **MCP集成**: 集成飞书、GitLab、Notion等MCP工具
+1. ~~**添加工具调用**~~: ✅ 已实现！支持9个内置工具（日期、搜索、天气、计算器等）
+2. ~~**流式响应**~~: ✅ 已实现！使用SSE实现实时输出（`/chat/stream`）
+3. ~~**Token统计**~~: ✅ 已实现！完整的Token使用统计和成本追踪
+4. ~~**监控追踪**~~: ✅ 已实现！可选的Langfuse云端监控
+5. **扩展工具系统**: 添加更多工具（文件操作、数据库查询等）
+6. **多模型支持**: 添加其他LLM提供商（Anthropic Claude、Gemini等）
+7. **RAG功能**: 集成向量数据库和检索器
+8. **用户认证**: 添加JWT或其他认证机制
+9. **MCP集成**: 集成飞书、GitLab、Notion等MCP工具
 
 ## 注意事项
 
@@ -369,59 +532,70 @@ POST /chat
 - 生产环境建议使用PostgreSQL或Redis作为checkpoint后端
 - 工具调用功能可通过 `ENABLE_TOOLS` 环境变量开关
 - Agent会自动判断是否需要调用工具，无需手动指定
+- Token统计数据保存在SQLite数据库中，支持按会话、按天、按月查询
+- Langfuse监控是可选功能，配置错误或连接失败不会影响对话功能
+- ⚠️ Langfuse与LangGraph存在兼容性问题，可能输出一些内部错误信息（不影响功能），详见 [docs/troubleshooting/langfuse-issues.md](docs/troubleshooting/langfuse-issues.md)
 - 记得保护好你的API密钥
 
 ## 📚 详细文档
 
 ### Tool Calling（工具调用）⭐
-- [工具调用完整文档](doc/TOOL_CALLING.md) - **推荐阅读**，工具系统详解、使用示例、自定义工具
-- [工具调用快速入门](doc/TOOL_CALLING_INTRO.md) - 快速上手工具调用
+- [工具调用完整文档](docs/guides/tool-calling.md) - **推荐阅读**，工具系统详解、使用示例、自定义工具
+- [工具调用快速入门](docs/guides/tool-calling-intro.md) - 快速上手工具调用
+
+### 监控与统计 ⭐
+- [Langfuse问题排查](docs/troubleshooting/langfuse-issues.md) - Langfuse集成的已知问题和解决方案
+- [Langfuse修复总结](docs/troubleshooting/langfuse-fix-summary.md) - 错误修复的技术细节
+- Token统计 - 完整的Token使用统计API（见上方API接口文档）
 
 ### 存储相关
-- [存储位置说明](doc/STORAGE.md) - session_id上下文存储在哪里
-- [存储方案对比](doc/STORAGE_OPTIONS.md) - 所有持久化存储方案详解
-- [快速切换指南](doc/STORAGE_COMPARISON.md) - 三种存储方案对比
-- [SQLite使用指南](doc/SWITCHED_TO_SQLITE.md) - 当前使用的SQLite配置
-- [PostgreSQL部署](doc/POSTGRES_SETUP.md) - 生产环境PostgreSQL配置
-- [数据库查询API](doc/DATABASE_QUERY_API.md) - 查询SQLite数据的接口文档
+- [存储位置说明](docs/guides/storage.md) - session_id上下文存储在哪里
+- [存储方案对比](docs/guides/storage-options.md) - 所有持久化存储方案详解
+- [快速切换指南](docs/guides/storage-comparison.md) - 三种存储方案对比
+- [SQLite使用指南](docs/guides/switched-to-sqlite.md) - 当前使用的SQLite配置
+- [PostgreSQL部署](docs/guides/postgres-setup.md) - 生产环境PostgreSQL配置
+- [数据库查询API](docs/api/database-query-api.md) - 查询SQLite数据的接口文档
 
 ### 上下文压缩
-- [压缩使用指南](doc/COMPRESSION_USAGE.md) - **推荐阅读**，配置和使用3种压缩策略
-- [压缩技术详解](doc/CONTEXT_COMPRESSION.md) - 深入理解压缩原理和方案对比
-- [Checkpoint机制](doc/CHECKPOINT_MECHANISM.md) - LangGraph自动保存机制详解
+- [压缩使用指南](docs/guides/compression.md) - **推荐阅读**，配置和使用3种压缩策略
+- [压缩技术详解](docs/guides/context-compression.md) - 深入理解压缩原理和方案对比
+- [Checkpoint机制](docs/architecture/checkpoint-mechanism.md) - LangGraph自动保存机制详解
 
 ### 开发指南
-- [踩坑记录](doc/PITFALLS.md) - SQLite持久化开发中的7个大坑
-- [快速参考](doc/QUICK_REFERENCE.md) - 常见错误和解决方案
+- [踩坑记录](docs/troubleshooting/pitfalls.md) - SQLite持久化开发中的7个大坑
+- [快速参考](docs/troubleshooting/quick-reference.md) - 常见错误和解决方案
 
 ## 🧪 测试脚本
 
 ```bash
 # ⭐ 工具调用测试（推荐优先尝试）
-python tests/test_tool_calling.py
+python tests/integration/test_tool_calling.py
+
+# ⭐ Langfuse修复验证
+python scripts/test/test_langfuse_fixed.py
 
 # 基础对话测试
-python test_agent.py
+python tests/unit/test_agent.py
 
 # 持久化功能测试
-python test_persistence.py
+python tests/integration/test_persistence.py
 
 # 验证重启后数据保留
-python test_persistence_verify.py
+python tests/integration/test_persistence_verify.py
 
 # 数据库查询接口测试
-python test_query_database.py
+python tests/integration/test_query_database.py
 
 # 会话隔离演示
-python demo_session.py
+python tests/demos/demo_session.py
 
 # 存储位置检查
-python check_storage.py
+python tests/demos/check_storage.py
 
 # 上下文压缩测试
-python examples/test_compression.py --strategy all          # 对比所有策略
-python examples/test_compression.py --strategy sliding_window  # 测试滑动窗口
-python examples/test_compression.py --long                  # 测试超长对话（50轮）
+python tests/demos/test_compression.py --strategy all          # 对比所有策略
+python tests/demos/test_compression.py --strategy sliding_window  # 测试滑动窗口
+python tests/demos/test_compression.py --long                  # 测试超长对话（50轮）
 ```
 
 ## License

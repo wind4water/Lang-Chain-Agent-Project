@@ -22,6 +22,100 @@ import aiosqlite
 
 from app.tools.loader import load_all_tools
 
+# ============ Langfuse 集成 ============
+from typing import Optional
+import logging
+import warnings
+
+# 条件导入 Langfuse（不强制依赖）
+try:
+    from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
+    LANGFUSE_AVAILABLE = True
+
+    # 创建一个安全的包装器，捕获回调中的错误
+    class SafeLangfuseCallbackHandler(LangfuseCallbackHandler):
+        """安全的 Langfuse 回调处理器，忽略内部错误"""
+
+        def _handle_error(self, error: Exception, method_name: str):
+            """统一的错误处理"""
+            # 忽略已知的无害错误
+            error_msg = str(error)
+            if any(msg in error_msg for msg in [
+                "'NoneType' object has no attribute 'get'",
+                "run not found",
+                "parent run not found"
+            ]):
+                # 这些错误不影响功能，静默忽略
+                logger.debug(f"Langfuse {method_name} 遇到已知错误（已忽略）: {error_msg}")
+            else:
+                # 其他错误记录但不抛出
+                logger.warning(f"Langfuse {method_name} 错误: {error}", exc_info=False)
+
+        def __generate_trace_and_parent(self, *args, **kwargs):
+            try:
+                return super().__generate_trace_and_parent(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "__generate_trace_and_parent")
+                return None, None
+
+        def on_chain_start(self, *args, **kwargs):
+            try:
+                return super().on_chain_start(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "on_chain_start")
+
+        def on_chain_end(self, *args, **kwargs):
+            try:
+                return super().on_chain_end(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "on_chain_end")
+
+        def on_tool_start(self, *args, **kwargs):
+            try:
+                return super().on_tool_start(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "on_tool_start")
+
+        def on_tool_end(self, *args, **kwargs):
+            try:
+                return super().on_tool_end(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "on_tool_end")
+
+        def on_llm_start(self, *args, **kwargs):
+            try:
+                return super().on_llm_start(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "on_llm_start")
+
+        def on_llm_end(self, *args, **kwargs):
+            try:
+                return super().on_llm_end(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "on_llm_end")
+
+        def on_chat_model_start(self, *args, **kwargs):
+            try:
+                return super().on_chat_model_start(*args, **kwargs)
+            except Exception as e:
+                self._handle_error(e, "on_chat_model_start")
+
+except ImportError:
+    LANGFUSE_AVAILABLE = False
+    LangfuseCallbackHandler = None
+    SafeLangfuseCallbackHandler = None
+
+logger = logging.getLogger(__name__)
+
+# 抑制 Langfuse 内部错误的日志输出（这些错误不影响功能）
+logging.getLogger("langfuse").setLevel(logging.ERROR)
+
+# 过滤 Langfuse callback 中的特定警告
+warnings.filterwarnings("ignore", message=".*'NoneType' object has no attribute 'get'.*")
+warnings.filterwarnings("ignore", message=".*run not found.*")
+warnings.filterwarnings("ignore", message=".*parent run not found.*")
+# ========================================
+
 
 class State(TypedDict):
     """对话状态定义"""
@@ -44,6 +138,60 @@ class SqliteAgentWithTools:
             api_key=api_key,
             base_url=os.getenv("OPENAI_BASE_URL")
         )
+
+        # ============ Langfuse 配置和初始化 ============
+        self.langfuse_enabled = False
+        self.langfuse_handler = None
+        self.langfuse_public_key = None
+        self.langfuse_secret_key = None
+        self.langfuse_host = None
+
+        # 检查是否启用 Langfuse
+        if os.getenv("LANGFUSE_ENABLED", "false").lower() == "true":
+            if not LANGFUSE_AVAILABLE:
+                logger.warning("⚠️ Langfuse 已启用但未安装。请运行: pip install langfuse")
+                print("⚠️ Langfuse 未安装，监控功能已禁用")
+            else:
+                try:
+                    # 验证必需配置
+                    public_key = os.getenv("LANGFUSE_PUBLIC_KEY")
+                    secret_key = os.getenv("LANGFUSE_SECRET_KEY")
+
+                    if not public_key or not secret_key:
+                        logger.warning("⚠️ Langfuse 配置不完整（缺少 PUBLIC_KEY 或 SECRET_KEY）")
+                        print("⚠️ Langfuse 配置不完整，监控功能已禁用")
+                    elif public_key.startswith("pk-lf-your-") or secret_key.startswith("sk-lf-your-"):
+                        logger.warning("⚠️ Langfuse 配置为示例值，请更新为真实密钥")
+                        print("⚠️ Langfuse 配置为示例值，监控功能已禁用")
+                    else:
+                        # 保存配置（用于创建新的 callback）
+                        self.langfuse_public_key = public_key
+                        self.langfuse_secret_key = secret_key
+                        self.langfuse_host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+                        # 使用安全的包装器初始化 Langfuse Handler
+                        self.langfuse_handler = SafeLangfuseCallbackHandler(
+                            public_key=public_key,
+                            secret_key=secret_key,
+                            host=self.langfuse_host,
+                            flush_at=int(os.getenv("LANGFUSE_FLUSH_AT", "15")),
+                            flush_interval=float(os.getenv("LANGFUSE_FLUSH_INTERVAL", "1.0")),
+                        )
+                        self.langfuse_enabled = True
+                        self.langfuse_sample_rate = float(os.getenv("LANGFUSE_SAMPLE_RATE", "1.0"))
+                        self.langfuse_trace_tools = os.getenv("LANGFUSE_TRACE_TOOL_DETAILS", "true").lower() == "true"
+
+                        logger.info("✅ Langfuse 监控已启用（使用安全包装器）")
+                        print(f"✅ Langfuse 监控已启用 (采样率: {self.langfuse_sample_rate*100:.0f}%)")
+
+                except Exception as e:
+                    logger.error(f"⚠️ Langfuse 初始化失败: {e}")
+                    print(f"⚠️ Langfuse 初始化失败: {e}")
+                    self.langfuse_enabled = False
+                    self.langfuse_handler = None
+        else:
+            logger.info("ℹ️ Langfuse 监控未启用")
+        # =============================================
 
         # 保存数据库路径
         self.db_path = db_path
@@ -82,6 +230,54 @@ class SqliteAgentWithTools:
         print(f"✅ 配置持久化存储：{os.path.abspath(db_path)}")
         print(f"✅ 上下文压缩策略: {self.compression_strategy}")
         print(f"✅ 工具调用: {'启用' if enable_tools else '禁用'}")
+
+    def _create_langfuse_callback(self, session_id: str, user_message: str = None):
+        """返回 Langfuse callback handler
+
+        Args:
+            session_id: 会话ID
+            user_message: 用户消息
+
+        Returns:
+            Langfuse callback handler 或 None
+        """
+        if not self.langfuse_enabled:
+            logger.debug("Langfuse callback 未创建: langfuse_enabled=%s", self.langfuse_enabled)
+            return None
+
+        # 采样控制
+        import random
+        sample = random.random()
+        if sample > self.langfuse_sample_rate:
+            logger.debug("Langfuse callback 跳过（采样）: sample=%.2f, rate=%.2f",
+                        sample, self.langfuse_sample_rate)
+            return None
+
+        try:
+            # 🔥 关键修复：每次请求创建新的 handler 实例，避免状态混乱
+            handler = SafeLangfuseCallbackHandler(
+                public_key=self.langfuse_public_key,
+                secret_key=self.langfuse_secret_key,
+                host=self.langfuse_host,
+                flush_at=int(os.getenv("LANGFUSE_FLUSH_AT", "15")),
+                flush_interval=float(os.getenv("LANGFUSE_FLUSH_INTERVAL", "1.0")),
+                # 添加 session 和 user 标识
+                session_id=session_id,
+            )
+
+            # 记录追踪信息
+            trace_name = f"chat_{session_id}"
+            if user_message:
+                preview = user_message[:50] + "..." if len(user_message) > 50 else user_message
+                trace_name = preview
+
+            logger.info("🔵 Langfuse 追踪: session_id=%s, trace_name=%s",
+                       session_id, trace_name)
+
+            return handler
+        except Exception as e:
+            logger.error("❌ 创建 Langfuse callback 失败: %s", e, exc_info=True)
+            return None
 
     async def _ensure_initialized(self):
         """确保checkpointer和graph已初始化"""
@@ -239,20 +435,39 @@ class SqliteAgentWithTools:
         return {"messages": [AIMessage(content=response)]}
 
     async def chat(self, message: str, session_id: str) -> str:
-        """处理用户消息（包含Token统计）"""
+        """处理用户消息（包含Token统计和Langfuse追踪）"""
         await self._ensure_initialized()
 
-        config = {"configurable": {"thread_id": session_id}}
+        # ============ Langfuse: 创建 callback ============
+        langfuse_callback = self._create_langfuse_callback(session_id, message)
+        callbacks = [langfuse_callback] if langfuse_callback else []
+
+        if langfuse_callback:
+            logger.info("🟢 Langfuse callback 已添加到 config")
+        else:
+            logger.debug("⚪ Langfuse callback 未创建，跳过追踪")
+        # ===============================================
+
+        config = {
+            "configurable": {"thread_id": session_id},
+            "callbacks": callbacks,  # 传递 callbacks
+        }
         user_message = HumanMessage(content=message)
 
         # 记录请求开始时间（用于后续分析）
         import time
         start_time = time.time()
 
+        logger.info("📤 开始调用 LangGraph: session_id=%s, callbacks_count=%d",
+                   session_id, len(callbacks))
+
         result = await self.graph.ainvoke(
             {"messages": [user_message]},
             config=config
         )
+
+        elapsed = time.time() - start_time
+        logger.info("📥 LangGraph 调用完成: elapsed=%.2fs", elapsed)
 
         # 尝试从结果中提取Token使用信息
         prompt_tokens = 0
@@ -291,6 +506,16 @@ class SqliteAgentWithTools:
             except Exception as e:
                 # Token统计失败不应该影响对话
                 print(f"⚠️ Token统计保存失败: {e}")
+
+        # ============ Langfuse: flush 数据 ============
+        if langfuse_callback:
+            try:
+                logger.info("🔄 开始 flush Langfuse 数据...")
+                langfuse_callback.flush()
+                logger.info("✅ Langfuse 数据 flush 完成")
+            except Exception as e:
+                logger.error("❌ Langfuse flush 失败: %s", e, exc_info=True)
+        # ============================================
 
         # 返回最后一条 AI 消息
         if ai_message:
@@ -685,7 +910,7 @@ class SqliteAgentWithTools:
                 }
 
     async def chat_stream(self, message: str, session_id: str):
-        """流式输出对话内容（Server-Sent Events）
+        """流式输出对话内容（支持Langfuse追踪）
 
         Args:
             message: 用户消息
@@ -696,13 +921,29 @@ class SqliteAgentWithTools:
         """
         await self._ensure_initialized()
 
-        config = {"configurable": {"thread_id": session_id}}
+        # ============ Langfuse: 创建 callback ============
+        langfuse_callback = self._create_langfuse_callback(session_id, message)
+        callbacks = [langfuse_callback] if langfuse_callback else []
+
+        if langfuse_callback:
+            logger.info("🟢 Langfuse callback 已添加到流式 config")
+        else:
+            logger.debug("⚪ Langfuse callback 未创建（流式），跳过追踪")
+        # ===============================================
+
+        config = {
+            "configurable": {"thread_id": session_id},
+            "callbacks": callbacks,  # 传递 callbacks
+        }
         user_message = HumanMessage(content=message)
 
         # 用于累积完整响应（用于后续保存Token统计）
         full_response = ""
         prompt_tokens = 0
         completion_tokens = 0
+
+        logger.info("📤 开始流式调用 LangGraph: session_id=%s, callbacks_count=%d",
+                   session_id, len(callbacks))
 
         try:
             # 使用 astream_events 获取流式事件
@@ -747,8 +988,28 @@ class SqliteAgentWithTools:
                 except Exception as e:
                     print(f"⚠️ Token统计保存失败: {e}")
 
+            # ============ Langfuse: flush 数据 ============
+            if langfuse_callback:
+                try:
+                    logger.info("🔄 开始 flush Langfuse 数据（流式）...")
+                    langfuse_callback.flush()
+                    logger.info("✅ Langfuse 数据 flush 完成（流式）")
+                except Exception as e:
+                    logger.error("❌ Langfuse flush 失败（流式）: %s", e, exc_info=True)
+            # ============================================
+
         except Exception as e:
             # 流式输出过程中的错误
             yield f"\n\n[错误: {str(e)}]"
+
+            # ============ Langfuse: 错误时也 flush ============
+            if langfuse_callback:
+                try:
+                    logger.info("🔄 错误后 flush Langfuse 数据...")
+                    langfuse_callback.flush()
+                    logger.info("✅ 错误后 flush 完成")
+                except Exception as flush_err:
+                    logger.error("❌ 错误后 flush 失败: %s", flush_err)
+            # ===============================================
 
 

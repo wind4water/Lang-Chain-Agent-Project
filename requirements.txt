@@ -20,3 +20,6 @@ duckduckgo-search==6.3.5  # 网络搜索
 beautifulsoup4==4.12.3     # 网页内容抓取
 requests==2.32.3           # HTTP请求（天气、货币、网页抓取）
 lxml==5.3.0               # HTML解析器（beautifulsoup4的依赖）
+
+# Langfuse 监控（可选）- 使用 1.x 版本以兼容 CallbackHandler API
+langfuse>=1.0.0,<2.0.0

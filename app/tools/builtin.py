@@ -12,28 +12,7 @@ import operator
 
 @tool
 def get_current_date_tool(format: Optional[str] = None) -> str:
-    """获取当前日期和时间
-
-    这个工具可以返回当前的日期和时间信息。
-
-    Args:
-        format: 可选的时间格式字符串。
-                如果不提供，返回标准格式 "YYYY年MM月DD日 HH:MM:SS"
-                可选格式示例：
-                - "%Y-%m-%d" -> "2026-05-08"
-                - "%Y/%m/%d %H:%M" -> "2026/05/08 14:30"
-                - "%Y年%m月%d日" -> "2026年05月08日"
-
-    Returns:
-        格式化的日期时间字符串
-
-    Examples:
-        >>> get_current_date_tool()
-        "2026年05月08日 14:30:45"
-
-        >>> get_current_date_tool("%Y-%m-%d")
-        "2026-05-08"
-    """
+    """获取当前日期和时间"""
     now = datetime.now()
 
     # 如果提供了格式，使用指定格式
@@ -49,31 +28,13 @@ def get_current_date_tool(format: Optional[str] = None) -> str:
 
 @tool
 def get_current_timestamp() -> str:
-    """获取当前 Unix 时间戳
-
-    返回从 1970-01-01 00:00:00 UTC 到现在的秒数。
-
-    Returns:
-        Unix 时间戳字符串（秒）
-
-    Examples:
-        >>> get_current_timestamp()
-        "1746691845"
-    """
+    """获取当前 Unix 时间戳"""
     return str(int(datetime.now().timestamp()))
 
 
 @tool
 def get_weekday() -> str:
-    """获取今天是星期几
-
-    Returns:
-        中文的星期表示，如 "星期一"、"星期二" 等
-
-    Examples:
-        >>> get_weekday()
-        "星期四"
-    """
+    """获取今天是星期几"""
     weekday_map = {
         0: "星期一",
         1: "星期二",
@@ -94,23 +55,7 @@ def get_weekday() -> str:
 
 @tool
 def calculator(expression: str) -> str:
-    """安全的数学计算器
-
-    支持基本运算: +, -, *, /, ** (幂), % (取模), // (整除), ()
-
-    Args:
-        expression: 数学表达式，如 "2+3*4" 或 "(10-2)/4" 或 "2**8"
-
-    Returns:
-        计算结果
-
-    Examples:
-        >>> calculator("2+3*4")
-        "2+3*4 = 14"
-
-        >>> calculator("(10-2)/4")
-        "(10-2)/4 = 2.0"
-    """
+    """安全的数学计算器，支持基本运算"""
     # 定义允许的操作符（安全）
     allowed_operators = {
         ast.Add: operator.add,
@@ -152,21 +97,7 @@ def calculator(expression: str) -> str:
 
 @tool
 def web_search(query: str, max_results: int = 5) -> str:
-    """网络搜索工具（使用 DuckDuckGo）
-
-    使用 DuckDuckGo 进行网络搜索，无需 API key
-
-    Args:
-        query: 搜索关键词
-        max_results: 最多返回结果数，默认5条
-
-    Returns:
-        搜索结果摘要
-
-    Examples:
-        >>> web_search("Python 教程")
-        "搜索 'Python 教程' 的结果: ..."
-    """
+    """使用 DuckDuckGo 进行网络搜索"""
     try:
         from duckduckgo_search import DDGS
 
@@ -191,18 +122,7 @@ def web_search(query: str, max_results: int = 5) -> str:
 
 @tool
 def get_weather(city: str) -> str:
-    """获取指定城市的天气信息
-
-    Args:
-        city: 城市名称，如"北京"、"上海"、"New York"
-
-    Returns:
-        天气信息字符串
-
-    Examples:
-        >>> get_weather("北京")
-        "北京当前天气: 温度: 15°C ..."
-    """
+    """获取指定城市的天气信息"""
     try:
         import requests
 
@@ -235,20 +155,7 @@ def get_weather(city: str) -> str:
 
 @tool
 def currency_converter(amount: float, from_currency: str, to_currency: str) -> str:
-    """货币汇率转换
-
-    Args:
-        amount: 金额
-        from_currency: 源货币代码（如 USD, CNY, EUR, GBP, JPY）
-        to_currency: 目标货币代码
-
-    Returns:
-        转换结果
-
-    Examples:
-        >>> currency_converter(100, "USD", "CNY")
-        "100 USD = 728.50 CNY"
-    """
+    """货币汇率转换"""
     try:
         import requests
 
@@ -279,19 +186,7 @@ def currency_converter(amount: float, from_currency: str, to_currency: str) -> s
 
 @tool
 def fetch_url_content(url: str, max_length: int = 2000) -> str:
-    """抓取网页内容
-
-    Args:
-        url: 网页URL
-        max_length: 返回内容的最大长度，默认2000字符
-
-    Returns:
-        网页文本内容（去除HTML标签）
-
-    Examples:
-        >>> fetch_url_content("https://example.com")
-        "网页内容: ..."
-    """
+    """抓取网页内容"""
     try:
         import requests
         from bs4 import BeautifulSoup
@@ -333,22 +228,7 @@ def fetch_url_content(url: str, max_length: int = 2000) -> str:
 
 @tool
 def python_executor(code: str) -> str:
-    """安全的 Python 代码执行器
-
-    在受限环境中执行简单的 Python 代码
-
-    Args:
-        code: Python 代码字符串
-
-    Returns:
-        执行结果或错误信息
-
-    警告: 仅支持基础运算和数据处理，禁用文件操作和网络访问
-
-    Examples:
-        >>> python_executor("print(sum([1, 2, 3, 4, 5]))")
-        "15"
-    """
+    """安全的 Python 代码执行器"""
     import sys
     from io import StringIO
     import contextlib

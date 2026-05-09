@@ -176,7 +176,9 @@ async def health():
         "agent_initialized": agent is not None,
         "storage_type": "SQLite",
         "tools_enabled": agent.enable_tools if agent else False,
-        "tools_count": len(agent.tools) if agent else 0
+        "tools_count": len(agent.tools) if agent else 0,
+        "langfuse_enabled": agent.langfuse_enabled if agent else False,
+        "langfuse_sample_rate": getattr(agent, "langfuse_sample_rate", 0.0) if agent else 0.0,
     }
 
 
