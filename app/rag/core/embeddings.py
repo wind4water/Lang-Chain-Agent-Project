@@ -84,5 +84,8 @@ class EmbeddingManager:
             "text-embedding-3-small": 1536,
             "text-embedding-3-large": 3072,
             "text-embedding-ada-002": 1536,
+            # 智谱AI嵌入模型
+            "embedding-2": 1024,
+            "embedding-3": 1024,  # 可配置256-2048，默认1024
         }
         return dimensions.get(self.model_name, 1536)

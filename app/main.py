@@ -1,17 +1,24 @@
+# 确保工作目录是项目根目录（支持 python app/main.py 和 uvicorn 两种启动方式）
+import os
+import sys
+
+# 获取项目根目录（main.py 所在目录的上级）
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(PROJECT_ROOT)
+
+# 必须先加载环境变量，再导入其他模块
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from app.agents.sqlite_with_tools import SqliteAgentWithTools
 from app.rag import rag_system  # RAG 系统
-from dotenv import load_dotenv
 import uvicorn
 import os
 import json
-
-
-# 加载环境变量
-load_dotenv()
 
 # 全局Agent实例
 agent = None

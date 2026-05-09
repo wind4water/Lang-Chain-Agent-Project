@@ -11,11 +11,11 @@ class RAGConfig(BaseModel):
 
     # 嵌入模型配置
     embedding_model: str = Field(
-        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "embedding-3"),
         description="嵌入模型名称"
     )
     embedding_dimension: int = Field(
-        default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSION", "1536")),
+        default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSION", "1024")),
         description="嵌入向量维度"
     )
 
@@ -25,7 +25,7 @@ class RAGConfig(BaseModel):
         description="向量数据库类型"
     )
     chroma_path: str = Field(
-        default_factory=lambda: os.getenv("CHROMA_PATH", "data/vectordb/chroma"),
+        default_factory=lambda: os.getenv("CHROMA_PATH", "./data/vectordb/chroma"),
         description="Chroma 数据库路径"
     )
     collection_name: str = Field(
@@ -35,7 +35,7 @@ class RAGConfig(BaseModel):
 
     # 文档路径配置
     documents_path: str = Field(
-        default_factory=lambda: os.getenv("RAG_DOCUMENTS_PATH", "data/documents"),
+        default_factory=lambda: os.getenv("RAG_DOCUMENTS_PATH", "./data/documents"),
         description="文档目录路径"
     )
 

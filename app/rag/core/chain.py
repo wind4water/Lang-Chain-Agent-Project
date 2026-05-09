@@ -197,8 +197,8 @@ class RAGChain:
         logger.info(f"RAG 异步查询（含来源）: {question}")
 
         try:
-            # 先检索相关文档
-            docs = await self.retriever.aget_relevant_documents(question)
+            # 先检索相关文档（使用同步方法，因为retriever可能不支持异步）
+            docs = self.retriever.invoke(question)
 
             # 生成答案
             answer = await self.ainvoke(question)
