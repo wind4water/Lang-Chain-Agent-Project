@@ -170,6 +170,31 @@ class SqliteAgentWithTools:
             )
         """)
 
+        # 创建 token_usage 表（新增）
+        await cursor.execute("""
+            CREATE TABLE IF NOT EXISTS token_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id TEXT,
+                prompt_tokens INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                cost_usd REAL DEFAULT 0.0,
+                model_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        await cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_token_session
+            ON token_usage(session_id)
+        """)
+
+        await cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_token_date
+            ON token_usage(created_at)
+        """)
+
         await self._conn.commit()
         print(f"✅ 数据库表已初始化")
 
@@ -214,21 +239,62 @@ class SqliteAgentWithTools:
         return {"messages": [AIMessage(content=response)]}
 
     async def chat(self, message: str, session_id: str) -> str:
-        """处理用户消息"""
+        """处理用户消息（包含Token统计）"""
         await self._ensure_initialized()
 
         config = {"configurable": {"thread_id": session_id}}
         user_message = HumanMessage(content=message)
+
+        # 记录请求开始时间（用于后续分析）
+        import time
+        start_time = time.time()
 
         result = await self.graph.ainvoke(
             {"messages": [user_message]},
             config=config
         )
 
-        # 返回最后一条 AI 消息
+        # 尝试从结果中提取Token使用信息
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        # 查找最后一条AI消息，尝试获取usage信息
+        ai_message = None
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage):
-                return msg.content
+                ai_message = msg
+                # 尝试从response_metadata中获取token信息
+                if hasattr(msg, 'response_metadata') and msg.response_metadata:
+                    usage = msg.response_metadata.get('token_usage') or msg.response_metadata.get('usage')
+                    if usage:
+                        prompt_tokens = usage.get('prompt_tokens', 0)
+                        completion_tokens = usage.get('completion_tokens', 0)
+                break
+
+        # 如果无法从metadata中获取，则进行简单估算
+        if prompt_tokens == 0 and completion_tokens == 0:
+            # 粗略估算：英文 ~4字符/token，中文 ~1.5-2字符/token
+            # 这里用一个保守的估算
+            prompt_tokens = len(message) // 3  # 估算用户输入
+            if ai_message:
+                completion_tokens = len(ai_message.content) // 3  # 估算AI输出
+
+        # 保存Token使用记录
+        if prompt_tokens > 0 or completion_tokens > 0:
+            try:
+                await self._save_token_usage(
+                    session_id=session_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model_name=self.llm.model_name
+                )
+            except Exception as e:
+                # Token统计失败不应该影响对话
+                print(f"⚠️ Token统计保存失败: {e}")
+
+        # 返回最后一条 AI 消息
+        if ai_message:
+            return ai_message.content
 
         return "没有收到有效回复"
 
@@ -380,3 +446,309 @@ class SqliteAgentWithTools:
             }
             for tool in self.tools
         ]
+
+    async def _save_token_usage(self, session_id: str, prompt_tokens: int,
+                                 completion_tokens: int, model_name: str,
+                                 message_id: str = None):
+        """保存Token使用记录
+
+        Args:
+            session_id: 会话ID
+            prompt_tokens: 提示词token数
+            completion_tokens: 完成token数
+            model_name: 模型名称
+            message_id: 消息ID（可选）
+        """
+        total_tokens = prompt_tokens + completion_tokens
+
+        # 根据模型计算成本（单位：美元/1000 tokens）
+        cost_per_1k = {
+            # OpenAI 模型
+            'gpt-4o-mini': {'input': 0.00015, 'output': 0.0006},
+            'gpt-4o': {'input': 0.005, 'output': 0.015},
+            'gpt-4-turbo': {'input': 0.01, 'output': 0.03},
+            'gpt-3.5-turbo': {'input': 0.0005, 'output': 0.0015},
+            # 智谱AI 模型
+            'glm-4-flash': {'input': 0.0001, 'output': 0.0001},
+            'glm-4': {'input': 0.001, 'output': 0.001},
+            # 默认价格（未知模型）
+            'default': {'input': 0, 'output': 0}
+        }
+
+        pricing = cost_per_1k.get(model_name, cost_per_1k['default'])
+        cost = (prompt_tokens / 1000 * pricing['input'] +
+                completion_tokens / 1000 * pricing['output'])
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            await conn.execute("""
+                INSERT INTO token_usage
+                (session_id, message_id, prompt_tokens, completion_tokens, total_tokens, cost_usd, model_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (session_id, message_id, prompt_tokens, completion_tokens, total_tokens, cost, model_name))
+            await conn.commit()
+
+    async def get_token_stats(self, session_id: str):
+        """获取指定会话的Token使用统计
+
+        Args:
+            session_id: 会话ID
+
+        Returns:
+            统计信息字典
+        """
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                # 获取总计
+                await cursor.execute("""
+                    SELECT
+                        COUNT(*) as request_count,
+                        SUM(prompt_tokens) as total_prompt_tokens,
+                        SUM(completion_tokens) as total_completion_tokens,
+                        SUM(total_tokens) as total_tokens,
+                        SUM(cost_usd) as total_cost,
+                        model_name
+                    FROM token_usage
+                    WHERE session_id = ?
+                    GROUP BY model_name
+                """, (session_id,))
+
+                rows = await cursor.fetchall()
+
+                if not rows:
+                    return {
+                        "session_id": session_id,
+                        "request_count": 0,
+                        "total_prompt_tokens": 0,
+                        "total_completion_tokens": 0,
+                        "total_tokens": 0,
+                        "total_cost_usd": 0.0,
+                        "by_model": []
+                    }
+
+                # 汇总所有模型的数据
+                total_requests = sum(row[0] for row in rows)
+                total_prompt = sum(row[1] or 0 for row in rows)
+                total_completion = sum(row[2] or 0 for row in rows)
+                total = sum(row[3] or 0 for row in rows)
+                total_cost = sum(row[4] or 0 for row in rows)
+
+                by_model = [
+                    {
+                        "model_name": row[5],
+                        "request_count": row[0],
+                        "prompt_tokens": row[1] or 0,
+                        "completion_tokens": row[2] or 0,
+                        "total_tokens": row[3] or 0,
+                        "cost_usd": round(row[4] or 0, 6)
+                    }
+                    for row in rows
+                ]
+
+                return {
+                    "session_id": session_id,
+                    "request_count": total_requests,
+                    "total_prompt_tokens": total_prompt,
+                    "total_completion_tokens": total_completion,
+                    "total_tokens": total,
+                    "total_cost_usd": round(total_cost, 6),
+                    "by_model": by_model
+                }
+
+            except Exception as e:
+                return {
+                    "session_id": session_id,
+                    "error": str(e),
+                    "request_count": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0
+                }
+
+    async def get_daily_token_stats(self, date: str = None):
+        """获取每日Token使用汇总
+
+        Args:
+            date: 日期字符串 (YYYY-MM-DD)，默认为今天
+
+        Returns:
+            当日统计信息
+        """
+        from datetime import datetime, timedelta
+
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute("""
+                    SELECT
+                        COUNT(DISTINCT session_id) as unique_sessions,
+                        COUNT(*) as total_requests,
+                        SUM(prompt_tokens) as total_prompt_tokens,
+                        SUM(completion_tokens) as total_completion_tokens,
+                        SUM(total_tokens) as total_tokens,
+                        SUM(cost_usd) as total_cost
+                    FROM token_usage
+                    WHERE DATE(created_at) = ?
+                """, (date,))
+
+                row = await cursor.fetchone()
+
+                if not row or row[0] is None:
+                    return {
+                        "date": date,
+                        "unique_sessions": 0,
+                        "total_requests": 0,
+                        "total_tokens": 0,
+                        "total_cost_usd": 0.0
+                    }
+
+                return {
+                    "date": date,
+                    "unique_sessions": row[0] or 0,
+                    "total_requests": row[1] or 0,
+                    "total_prompt_tokens": row[2] or 0,
+                    "total_completion_tokens": row[3] or 0,
+                    "total_tokens": row[4] or 0,
+                    "total_cost_usd": round(row[5] or 0, 6)
+                }
+
+            except Exception as e:
+                return {
+                    "date": date,
+                    "error": str(e),
+                    "unique_sessions": 0,
+                    "total_requests": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0
+                }
+
+    async def get_monthly_token_stats(self, year_month: str = None):
+        """获取每月Token使用汇总
+
+        Args:
+            year_month: 年月字符串 (YYYY-MM)，默认为当月
+
+        Returns:
+            当月统计信息
+        """
+        from datetime import datetime
+
+        if year_month is None:
+            year_month = datetime.now().strftime("%Y-%m")
+
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+            try:
+                await cursor.execute("""
+                    SELECT
+                        COUNT(DISTINCT session_id) as unique_sessions,
+                        COUNT(*) as total_requests,
+                        SUM(prompt_tokens) as total_prompt_tokens,
+                        SUM(completion_tokens) as total_completion_tokens,
+                        SUM(total_tokens) as total_tokens,
+                        SUM(cost_usd) as total_cost
+                    FROM token_usage
+                    WHERE strftime('%Y-%m', created_at) = ?
+                """, (year_month,))
+
+                row = await cursor.fetchone()
+
+                if not row or row[0] is None:
+                    return {
+                        "year_month": year_month,
+                        "unique_sessions": 0,
+                        "total_requests": 0,
+                        "total_tokens": 0,
+                        "total_cost_usd": 0.0
+                    }
+
+                return {
+                    "year_month": year_month,
+                    "unique_sessions": row[0] or 0,
+                    "total_requests": row[1] or 0,
+                    "total_prompt_tokens": row[2] or 0,
+                    "total_completion_tokens": row[3] or 0,
+                    "total_tokens": row[4] or 0,
+                    "total_cost_usd": round(row[5] or 0, 6)
+                }
+
+            except Exception as e:
+                return {
+                    "year_month": year_month,
+                    "error": str(e),
+                    "unique_sessions": 0,
+                    "total_requests": 0,
+                    "total_tokens": 0,
+                    "total_cost_usd": 0.0
+                }
+
+    async def chat_stream(self, message: str, session_id: str):
+        """流式输出对话内容（Server-Sent Events）
+
+        Args:
+            message: 用户消息
+            session_id: 会话ID
+
+        Yields:
+            字符串片段（逐字输出）
+        """
+        await self._ensure_initialized()
+
+        config = {"configurable": {"thread_id": session_id}}
+        user_message = HumanMessage(content=message)
+
+        # 用于累积完整响应（用于后续保存Token统计）
+        full_response = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        try:
+            # 使用 astream_events 获取流式事件
+            async for event in self.graph.astream_events(
+                {"messages": [user_message]},
+                config=config,
+                version="v2"  # 使用v2版本的事件API
+            ):
+                kind = event["event"]
+
+                # 处理不同类型的事件
+                if kind == "on_chat_model_stream":
+                    # LLM流式输出的内容片段
+                    content = event["data"]["chunk"].content
+                    if content:
+                        full_response += content
+                        yield content
+
+                elif kind == "on_chat_model_end":
+                    # LLM完成，尝试获取usage信息
+                    if "response_metadata" in event["data"]["output"]:
+                        metadata = event["data"]["output"]["response_metadata"]
+                        usage = metadata.get('token_usage') or metadata.get('usage')
+                        if usage:
+                            prompt_tokens = usage.get('prompt_tokens', 0)
+                            completion_tokens = usage.get('completion_tokens', 0)
+
+            # 流式输出完成后，保存Token统计
+            if prompt_tokens == 0 and completion_tokens == 0:
+                # 如果没有获取到usage信息，进行估算
+                prompt_tokens = len(message) // 3
+                completion_tokens = len(full_response) // 3
+
+            if prompt_tokens > 0 or completion_tokens > 0:
+                try:
+                    await self._save_token_usage(
+                        session_id=session_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        model_name=self.llm.model_name
+                    )
+                except Exception as e:
+                    print(f"⚠️ Token统计保存失败: {e}")
+
+        except Exception as e:
+            # 流式输出过程中的错误
+            yield f"\n\n[错误: {str(e)}]"
+
+

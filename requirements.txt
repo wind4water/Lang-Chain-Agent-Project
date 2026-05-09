@@ -14,3 +14,9 @@ aiosqlite==0.20.0
 psycopg[binary]==3.1.18
 asyncpg==0.29.0
 langgraph-checkpoint-postgres==2.0.2
+
+# 新增工具依赖
+duckduckgo-search==6.3.5  # 网络搜索
+beautifulsoup4==4.12.3     # 网页内容抓取
+requests==2.32.3           # HTTP请求（天气、货币、网页抓取）
+lxml==5.3.0               # HTML解析器（beautifulsoup4的依赖）
