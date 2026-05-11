@@ -401,9 +401,9 @@ async def rag_query(request: RAGQueryRequest):
 @app.post("/rag/rebuild")
 async def rag_rebuild():
     """
-    重建知识库
+    重建知识库（全量重建）
 
-    重新加载文档目录中的所有文档并重建向量索引
+    清空并重新索引所有文档
     """
     try:
         if not rag_system._initialized:
@@ -414,7 +414,7 @@ async def rag_rebuild():
 
         result = await rag_system.rebuild_knowledge_base()
         return {
-            "message": "知识库重建完成",
+            "message": "知识库全量重建完成",
             **result
         }
 
@@ -422,6 +422,44 @@ async def rag_rebuild():
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重建知识库失败: {str(e)}")
+
+
+@app.post("/rag/sync")
+async def rag_sync():
+    """
+    智能同步知识库（增量更新）⭐
+
+    自动检测文档变更，只更新变化的部分：
+    - 新增文档：索引新文档
+    - 修改文档：删除旧版本，索引新版本
+    - 删除文档：从索引中移除
+
+    推荐：日常使用此接口，性能更好
+    """
+    try:
+        if not rag_system._initialized:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置"
+            )
+
+        result = await rag_system.sync_knowledge_base()
+
+        if result["has_changes"]:
+            return {
+                "message": "知识库智能同步完成",
+                **result
+            }
+        else:
+            return {
+                "message": "知识库无变更，跳过同步",
+                **result
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"同步知识库失败: {str(e)}")
 
 
 @app.get("/rag/stats")

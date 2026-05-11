@@ -68,6 +68,58 @@ class VectorStoreManager:
         logger.info(f"✅ 成功添加 {len(ids)} 个文档")
         return ids
 
+    def delete_by_source(self, source_path: str) -> int:
+        """
+        根据文档来源删除文档
+
+        Args:
+            source_path: 文档来源路径（在metadata中的source字段）
+
+        Returns:
+            删除的文档数量
+        """
+        try:
+            collection = self.vectorstore._collection
+            # 查询所有匹配的文档ID
+            results = collection.get(where={"source": source_path})
+
+            if not results or not results.get('ids'):
+                logger.debug(f"未找到来源为 {source_path} 的文档")
+                return 0
+
+            ids_to_delete = results['ids']
+            collection.delete(ids=ids_to_delete)
+
+            logger.info(f"✅ 删除了 {len(ids_to_delete)} 个文档块（来源: {source_path}）")
+            return len(ids_to_delete)
+
+        except Exception as e:
+            logger.error(f"删除文档失败 {source_path}: {e}")
+            return 0
+
+    def update_documents(self, documents: List[Document], source_path: str) -> List[str]:
+        """
+        更新文档（先删除旧版本，再添加新版本）
+
+        Args:
+            documents: 新的文档列表
+            source_path: 文档来源路径
+
+        Returns:
+            新文档的 ID 列表
+        """
+        logger.info(f"更新文档: {source_path}")
+
+        # 删除旧版本
+        deleted_count = self.delete_by_source(source_path)
+        logger.debug(f"删除旧文档: {deleted_count} 个块")
+
+        # 添加新版本
+        ids = self.add_documents(documents)
+        logger.info(f"✅ 更新完成: {source_path} ({len(ids)} 个块)")
+
+        return ids
+
     def similarity_search(
         self,
         query: str,
