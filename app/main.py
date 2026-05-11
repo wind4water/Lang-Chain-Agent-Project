@@ -10,6 +10,16 @@ os.chdir(PROJECT_ROOT)
 from dotenv import load_dotenv
 load_dotenv()
 
+# 配置日志输出到控制台
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field

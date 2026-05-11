@@ -6,6 +6,7 @@
 from typing import List, Optional
 from langchain_core.tools import BaseTool
 import logging
+import os
 
 from .builtin import BUILTIN_TOOLS
 
@@ -123,11 +124,22 @@ def load_all_tools(include_builtin: bool = True) -> List[BaseTool]:
         tools.extend(builtin)
         logger.info(f"✅ 加载了 {len(builtin)} 个内置工具")
 
-    # 2. 未来可以在这里加载自定义工具
+    # 2. 加载 RAG 知识库搜索工具（如果启用）
+    if os.getenv("RAG_ENABLED", "false").lower() == "true":
+        try:
+            from .rag_tool import RAGSearchTool
+            rag_tool = RAGSearchTool()
+            tools.append(rag_tool)
+            logger.info(f"✅ 加载了 RAG 知识库搜索工具")
+        except Exception as e:
+            logger.warning(f"⚠️  加载 RAG 工具失败: {e}")
+            logger.warning("   RAG 工具将不可用，但不影响其他功能")
+
+    # 3. 未来可以在这里加载自定义工具
     # custom_tools = load_custom_tools()
     # tools.extend(custom_tools)
 
-    # 3. 未来可以在这里加载 MCP 工具
+    # 4. 未来可以在这里加载 MCP 工具
     # mcp_tools = load_mcp_tools()
     # tools.extend(mcp_tools)
 

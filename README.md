@@ -10,7 +10,8 @@
 - ✅ **HTTP API**: FastAPI提供RESTful接口
 - ✅ **会话管理**: 支持多用户多会话，独立存储对话历史
 - ✅ **异步处理**: 全异步架构，高性能
-- ⭐ **Tool Calling**: Agent自动判断并调用工具完成任务（日期、搜索、天气、计算器等9个内置工具）
+- ⭐ **Tool Calling**: Agent自动判断并调用工具完成任务（日期、搜索、天气、计算器、知识库等10个内置工具）
+- ⭐ **RAG知识库**: 支持文档检索增强生成，Agent可自动查询内部知识库（TXT/MD/PDF格式）
 - ⭐ **上下文压缩**: 支持3种压缩策略（滑动窗口、Token计数、智能摘要），防止token超限
 - ⭐ **流式响应**: 支持SSE流式输出，实时显示AI回复
 - ⭐ **Token统计**: 完整的Token使用统计和成本追踪（按会话、按天、按月）
@@ -119,6 +120,18 @@ CONTEXT_COMPRESSION_STRATEGY=sliding_window  # 推荐使用滑动窗口
 COMPRESSION_WINDOW_SIZE=10  # 滑动窗口保留的对话轮数
 
 # ========================================
+# RAG 知识库配置（可选）⭐
+# ========================================
+# 是否启用 RAG 知识库功能
+RAG_ENABLED=true  # 默认启用，Agent可自动查询内部知识库
+# 文档目录路径（支持 TXT、MD、PDF 格式）
+RAG_DOCUMENTS_PATH=data/documents
+# 向量数据库路径
+RAG_CHROMA_PATH=data/chroma
+# 是否在启动时重建索引
+RAG_REBUILD_ON_STARTUP=false  # 仅首次启动或文档变更时设为 true
+
+# ========================================
 # Langfuse 监控配置（可选）
 # ========================================
 # 是否启用 Langfuse 追踪和监控
@@ -129,7 +142,9 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 LANGFUSE_SAMPLE_RATE=1.0  # 采样率 0.0-1.0
 ```
 
-> 💡 **工具调用**：启用后Agent可以自动调用9个内置工具（日期、搜索、天气、计算器等）。详见 [docs/guides/tool-calling.md](docs/guides/tool-calling.md)
+> 💡 **工具调用**：启用后Agent可以自动调用10个内置工具（日期、搜索、天气、计算器、知识库等）。详见 [docs/guides/tool-calling.md](docs/guides/tool-calling.md)
+> 
+> 💡 **RAG 知识库**：启用后Agent可自动查询内部文档（TXT/MD/PDF）。将文档放入 `data/documents/` 即可。详见 [docs/guides/rag-tool-integration.md](docs/guides/rag-tool-integration.md)
 > 
 > 💡 **上下文压缩**：长对话会导致token超限和成本暴涨。推荐使用 `sliding_window` 策略。详见 [docs/guides/compression.md](docs/guides/compression.md)
 >
@@ -145,7 +160,7 @@ python app/main.py
 
 启动日志示例：
 ```
-🔧 加载了 9 个工具:
+🔧 加载了 10 个工具:
    - get_current_date_tool: 获取当前日期和时间
    - get_current_timestamp: 获取当前 Unix 时间戳
    - get_weekday: 获取今天是星期几
@@ -155,6 +170,7 @@ python app/main.py
    - currency_converter: 货币汇率转换
    - fetch_url_content: 抓取网页内容
    - python_executor: 安全的 Python 代码执行器
+   - knowledge_base_search: 在内部知识库中搜索信息  ⭐ RAG
 ✅ 配置持久化存储: /Users/shenyang/Trip/AIProject/LangChainProject/checkpoints/conversations.db
 ✅ 上下文压缩策略: sliding_window
 ✅ 工具调用: 启用
@@ -210,6 +226,14 @@ curl -X POST "http://localhost:8000/chat" \
     "message": "北京今天天气怎么样？",
     "session_id": "user_123"
   }'
+
+# 查询知识库（Agent会自动调用knowledge_base_search）⭐
+curl -X POST "http://localhost:8000/chat" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "系统支持哪些文档格式？",
+    "session_id": "user_123"
+  }'
 ```
 
 响应：
@@ -254,7 +278,7 @@ curl "http://localhost:8000/tools"
 ```json
 {
   "enabled": true,
-  "total": 9,
+  "total": 10,
   "tools": [
     {
       "name": "get_current_date_tool",
@@ -291,6 +315,10 @@ curl "http://localhost:8000/tools"
     {
       "name": "python_executor",
       "description": "安全的 Python 代码执行器"
+    },
+    {
+      "name": "knowledge_base_search",
+      "description": "在内部知识库中搜索信息"
     }
   ]
 }
@@ -329,7 +357,7 @@ curl "http://localhost:8000/health"
   "agent_initialized": true,
   "storage_type": "SQLite",
   "tools_enabled": true,
-  "tools_count": 9,
+  "tools_count": 10,
   "langfuse_enabled": false,
   "langfuse_sample_rate": 0.0
 }
@@ -516,13 +544,13 @@ POST /chat
 
 ## 扩展建议
 
-1. ~~**添加工具调用**~~: ✅ 已实现！支持9个内置工具（日期、搜索、天气、计算器等）
+1. ~~**添加工具调用**~~: ✅ 已实现！支持10个内置工具（日期、搜索、天气、计算器、知识库等）
 2. ~~**流式响应**~~: ✅ 已实现！使用SSE实现实时输出（`/chat/stream`）
 3. ~~**Token统计**~~: ✅ 已实现！完整的Token使用统计和成本追踪
 4. ~~**监控追踪**~~: ✅ 已实现！可选的Langfuse云端监控
-5. **扩展工具系统**: 添加更多工具（文件操作、数据库查询等）
-6. **多模型支持**: 添加其他LLM提供商（Anthropic Claude、Gemini等）
-7. **RAG功能**: 集成向量数据库和检索器
+5. ~~**RAG功能**~~: ✅ 已实现！集成向量数据库和文档检索（支持TXT/MD/PDF）
+6. **扩展工具系统**: 添加更多工具（文件操作、数据库查询等）
+7. **多模型支持**: 添加其他LLM提供商（Anthropic Claude、Gemini等）
 8. **用户认证**: 添加JWT或其他认证机制
 9. **MCP集成**: 集成飞书、GitLab、Notion等MCP工具
 
@@ -540,6 +568,12 @@ POST /chat
 - 记得保护好你的API密钥
 
 ## 📚 详细文档
+
+### RAG 知识库 ⭐
+- [RAG 工具集成文档](docs/guides/rag-tool-integration.md) - RAG功能使用指南和示例
+- [Agent 决策机制](docs/guides/agent-decision-mechanism.md) - Agent如何判断调用RAG
+- [RAG 架构分析](docs/architecture/rag-implementation-analysis.md) - 当前实现和改进方向
+- [企业级 RAG 架构](docs/architecture/enterprise-rag-architecture.md) - 大厂RAG系统参考
 
 ### Tool Calling（工具调用）⭐
 - [工具调用完整文档](docs/guides/tool-calling.md) - **推荐阅读**，工具系统详解、使用示例、自定义工具
@@ -572,6 +606,12 @@ POST /chat
 ```bash
 # ⭐ 工具调用测试（推荐优先尝试）
 python tests/integration/test_tool_calling.py
+
+# ⭐ RAG 工具测试
+python tests/test_rag_tool_quick.py
+
+# ⭐ RAG 集成演示（需先启动服务）
+bash scripts/demo_rag_tool.sh
 
 # ⭐ Langfuse修复验证
 python scripts/test/test_langfuse_fixed.py
