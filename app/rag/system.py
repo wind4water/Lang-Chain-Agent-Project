@@ -34,6 +34,23 @@ class RAGSystem:
 
         logger.info("RAG 系统管理器已创建")
 
+    def _rebuild_rag_chain(self):
+        """基于当前向量库状态重建检索器与 RAG Chain。"""
+        if self.vectorstore_manager is None or self.llm is None:
+            logger.warning("跳过重建 RAG Chain：vectorstore_manager 或 llm 未初始化")
+            return
+
+        retriever = self.vectorstore_manager.get_retriever(
+            search_type=self.config.search_type,
+            k=self.config.top_k,
+            score_threshold=self.config.score_threshold
+        )
+        self.rag_chain = RAGChain(
+            llm=self.llm,
+            retriever=retriever
+        )
+        logger.info(f"   ✅ 检索器已刷新: search_type={self.config.search_type}, Top-K={self.config.top_k}")
+
     async def initialize(self):
         """初始化 RAG 系统"""
         if self._initialized:
@@ -109,16 +126,7 @@ class RAGSystem:
 
             # 7. 初始化 RAG Chain
             logger.info("7️⃣  初始化 RAG Chain...")
-            retriever = self.vectorstore_manager.get_retriever(
-                search_type=self.config.search_type,
-                k=self.config.top_k,
-                score_threshold=self.config.score_threshold
-            )
-            self.rag_chain = RAGChain(
-                llm=self.llm,
-                retriever=retriever
-            )
-            logger.info(f"   ✅ 检索类型: {self.config.search_type}, Top-K: {self.config.top_k}")
+            self._rebuild_rag_chain()
 
             self._initialized = True
 
@@ -181,7 +189,8 @@ class RAGSystem:
             # 2. 处理删除的文档
             for file_path in deleted_files:
                 logger.info(f"❌ 删除: {file_path}")
-                self.vectorstore_manager.delete_by_source(file_path)
+                indexed_source = os.path.normpath(os.path.join(documents_path, file_path))
+                self.vectorstore_manager.delete_by_source(indexed_source)
                 self.document_registry.unregister_document(file_path)
 
             # 3. 处理新增和修改的文档
@@ -217,10 +226,11 @@ class RAGSystem:
                     # 逐个文档更新向量存储
                     for rel_source, docs in docs_by_source.items():
                         abs_source = os.path.join(documents_path, rel_source)
+                        indexed_source = os.path.normpath(abs_source)
 
                         if rel_source in modified_files:
                             logger.info(f"🔄 更新: {rel_source}")
-                            self.vectorstore_manager.update_documents(docs, rel_source)
+                            self.vectorstore_manager.update_documents(docs, indexed_source)
                         else:
                             logger.info(f"➕ 新增: {rel_source}")
                             self.vectorstore_manager.add_documents(docs)
@@ -336,6 +346,9 @@ class RAGSystem:
                 "collection_name": self.config.collection_name
             }
 
+            # 5. 重建后刷新 retriever，避免继续使用旧 collection 引用
+            self._rebuild_rag_chain()
+
             logger.info("✅ 知识库重建完成")
             return result
 
@@ -357,11 +370,23 @@ class RAGSystem:
         if not self._initialized:
             raise RuntimeError("RAG 系统未初始化")
 
-        if with_sources:
-            return await self.rag_chain.ainvoke_with_sources(question)
-        else:
-            answer = await self.rag_chain.ainvoke(question)
-            return {"answer": answer}
+        try:
+            if with_sources:
+                return await self.rag_chain.ainvoke_with_sources(question)
+            else:
+                answer = await self.rag_chain.ainvoke(question)
+                return {"answer": answer}
+        except Exception as e:
+            # 部分场景下（如重建后）旧 retriever 仍指向已删除 collection，自动刷新并重试一次
+            if "collection not initialized" in str(e).lower():
+                logger.warning("检测到 collection 未初始化，刷新 retriever 后重试一次")
+                self._rebuild_rag_chain()
+                if with_sources:
+                    return await self.rag_chain.ainvoke_with_sources(question)
+                else:
+                    answer = await self.rag_chain.ainvoke(question)
+                    return {"answer": answer}
+            raise
 
     def get_stats(self) -> Dict[str, Any]:
         """

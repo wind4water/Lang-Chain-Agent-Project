@@ -9,6 +9,8 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
 import logging
 
+from app.token_usage import record_llm_token_usage
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,6 +117,12 @@ class RAGChain:
 
         try:
             answer = self.chain.invoke(question)
+            # 当前实现通过 StrOutputParser 丢失了原始 usage，使用近似值统计请求级 token
+            record_llm_token_usage(
+                prompt_tokens=len(question) // 3,
+                completion_tokens=len(answer) // 3,
+                model_name=getattr(self.llm, "model_name", "")
+            )
             logger.info("✅ RAG 回答生成成功")
             return answer
 
@@ -136,6 +144,12 @@ class RAGChain:
 
         try:
             answer = await self.chain.ainvoke(question)
+            # 当前实现通过 StrOutputParser 丢失了原始 usage，使用近似值统计请求级 token
+            record_llm_token_usage(
+                prompt_tokens=len(question) // 3,
+                completion_tokens=len(answer) // 3,
+                model_name=getattr(self.llm, "model_name", "")
+            )
             logger.info("✅ RAG 回答生成成功")
             return answer
 

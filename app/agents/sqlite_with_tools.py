@@ -21,6 +21,7 @@ import os
 import aiosqlite
 
 from app.tools.loader import load_all_tools
+from app.token_usage import record_llm_token_usage
 
 # ============ Langfuse 集成 ============
 from typing import Optional
@@ -387,28 +388,38 @@ class SqliteAgentWithTools:
         elapsed = time.time() - start_time
         logger.info("📥 LangGraph 调用完成: elapsed=%.2fs", elapsed)
 
-        # 尝试从结果中提取Token使用信息
+        # 尝试从结果中提取Token使用信息（累计多次模型调用）
         prompt_tokens = 0
         completion_tokens = 0
+        usage_found = False
 
         # 查找最后一条AI消息，尝试获取usage信息
         ai_message = None
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage):
                 ai_message = msg
-                # 尝试从response_metadata中获取token信息
-                if hasattr(msg, 'response_metadata') and msg.response_metadata:
-                    usage = msg.response_metadata.get('token_usage') or msg.response_metadata.get('usage')
-                    if usage:
-                        prompt_tokens = usage.get('prompt_tokens', 0)
-                        completion_tokens = usage.get('completion_tokens', 0)
                 break
 
+        for msg in result["messages"]:
+            if isinstance(msg, AIMessage) and hasattr(msg, 'response_metadata') and msg.response_metadata:
+                usage = msg.response_metadata.get('token_usage') or msg.response_metadata.get('usage')
+                if usage:
+                    usage_found = True
+                    prompt_tokens += usage.get('prompt_tokens', 0)
+                    completion_tokens += usage.get('completion_tokens', 0)
+
         # 如果无法从metadata中获取，则进行简单估算
-        if prompt_tokens == 0 and completion_tokens == 0:
+        if not usage_found and prompt_tokens == 0 and completion_tokens == 0:
             prompt_tokens = len(message) // 3
             if ai_message:
                 completion_tokens = len(ai_message.content) // 3
+
+        if prompt_tokens > 0 or completion_tokens > 0:
+            record_llm_token_usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                model_name=self.llm.model_name
+            )
 
         # 保存Token使用记录
         if prompt_tokens > 0 or completion_tokens > 0:
@@ -897,13 +908,20 @@ class SqliteAgentWithTools:
                         metadata = event["data"]["output"]["response_metadata"]
                         usage = metadata.get('token_usage') or metadata.get('usage')
                         if usage:
-                            prompt_tokens = usage.get('prompt_tokens', 0)
-                            completion_tokens = usage.get('completion_tokens', 0)
+                            prompt_tokens += usage.get('prompt_tokens', 0)
+                            completion_tokens += usage.get('completion_tokens', 0)
 
             # 流式输出完成后，保存Token统计
             if prompt_tokens == 0 and completion_tokens == 0:
                 prompt_tokens = len(message) // 3
                 completion_tokens = len(full_response) // 3
+
+            if prompt_tokens > 0 or completion_tokens > 0:
+                record_llm_token_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model_name=self.llm.model_name
+                )
 
             if prompt_tokens > 0 or completion_tokens > 0:
                 try:

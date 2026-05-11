@@ -26,12 +26,20 @@ from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from app.agents.sqlite_with_tools import SqliteAgentWithTools
 from app.rag import rag_system  # RAG 系统
+from app.token_usage import request_token_scope, get_request_token_usage
 import uvicorn
 import os
 import json
 
 # 全局Agent实例
 agent = None
+
+
+def _with_request_tokens(payload: dict) -> dict:
+    """为接口返回追加本次请求 token 汇总字段。"""
+    result = dict(payload)
+    result["request_total_tokens"] = get_request_token_usage()["total_tokens"]
+    return result
 
 
 @asynccontextmanager
@@ -74,45 +82,49 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str = Field(..., description="AI回复")
     session_id: str = Field(..., description="会话ID")
+    request_total_tokens: int = Field(default=0, description="本次请求累计 token 数")
 
 
 class HistoryResponse(BaseModel):
     session_id: str
     history: list
+    request_total_tokens: int = Field(default=0, description="本次请求累计 token 数")
 
 
 @app.get("/")
 async def root():
     """根路径"""
-    return {
-        "message": "LangChain对话Agent API (with Tool Calling + RAG)",
-        "storage": "SQLite Persistent Storage",
-        "features": [
-            "Tool Calling - 自动调用工具完成任务",
-            "Context Compression - 上下文压缩",
-            "Persistent Storage - SQLite 持久化",
-            "Multi-Session - 多会话管理",
-            "Token Statistics - Token使用统计和成本追踪",
-            "RAG - 检索增强生成（知识库问答）"
-        ],
-        "endpoints": {
-            "POST /chat": "发送消息进行对话",
-            "POST /chat/stream": "流式对话（Server-Sent Events）",
-            "GET /history/{session_id}": "获取会话历史",
-            "DELETE /history/{session_id}": "清除会话历史",
-            "GET /sessions": "查看所有会话列表",
-            "GET /database/stats": "查看数据库统计信息",
-            "GET /database/sessions/{session_id}": "查看指定会话的详细信息",
-            "GET /tools": "查看所有可用工具",
-            "GET /stats/tokens/{session_id}": "查看指定会话的Token统计",
-            "GET /stats/tokens/daily": "查看每日Token统计",
-            "GET /stats/tokens/monthly": "查看每月Token统计",
-            "GET /health": "健康检查",
-            "POST /rag/query": "RAG 知识库问答",
-            "POST /rag/rebuild": "重建知识库",
-            "GET /rag/stats": "RAG 系统统计信息"
-        }
-    }
+    async with request_token_scope():
+        return _with_request_tokens({
+            "message": "LangChain对话Agent API (with Tool Calling + RAG)",
+            "storage": "SQLite Persistent Storage",
+            "features": [
+                "Tool Calling - 自动调用工具完成任务",
+                "Context Compression - 上下文压缩",
+                "Persistent Storage - SQLite 持久化",
+                "Multi-Session - 多会话管理",
+                "Token Statistics - Token使用统计和成本追踪",
+                "RAG - 检索增强生成（知识库问答）"
+            ],
+            "endpoints": {
+                "POST /chat": "发送消息进行对话",
+                "POST /chat/stream": "流式对话（Server-Sent Events）",
+                "GET /history/{session_id}": "获取会话历史",
+                "DELETE /history/{session_id}": "清除会话历史",
+                "GET /sessions": "查看所有会话列表",
+                "GET /database/stats": "查看数据库统计信息",
+                "GET /database/sessions/{session_id}": "查看指定会话的详细信息",
+                "GET /tools": "查看所有可用工具",
+                "GET /stats/tokens/{session_id}": "查看指定会话的Token统计",
+                "GET /stats/tokens/daily": "查看每日Token统计",
+                "GET /stats/tokens/monthly": "查看每月Token统计",
+                "GET /health": "健康检查",
+                "POST /rag/query": "RAG 知识库问答",
+                "POST /rag/rebuild": "重建知识库（全量）",
+                "POST /rag/sync": "智能同步知识库（增量更新）⭐推荐",
+                "GET /rag/stats": "RAG 系统统计信息"
+            }
+        })
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -123,14 +135,16 @@ async def chat(request: ChatRequest):
     - **message**: 用户消息
     - **session_id**: 会话ID（可选，默认为"default"）
     """
-    try:
-        response = await agent.chat(request.message, request.session_id)
-        return ChatResponse(
-            response=response,
-            session_id=request.session_id
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"处理消息时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            response = await agent.chat(request.message, request.session_id)
+            return ChatResponse(
+                response=response,
+                session_id=request.session_id,
+                request_total_tokens=get_request_token_usage()["total_tokens"]
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"处理消息时出错: {str(e)}")
 
 
 @app.post("/chat/stream")
@@ -144,16 +158,21 @@ async def chat_stream(request: ChatRequest):
     返回流式响应，逐字输出AI回复
     """
     async def generate():
-        try:
-            async for chunk in agent.chat_stream(request.message, request.session_id):
-                # SSE格式：data: {json}\n\n
-                yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+        async with request_token_scope():
+            try:
+                async for chunk in agent.chat_stream(request.message, request.session_id):
+                    # SSE格式：data: {json}\n\n
+                    yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
 
-            # 发送完成标记
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            # 发送错误信息
-            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                # 发送本次请求 token 汇总
+                usage = get_request_token_usage()
+                yield f"data: {json.dumps({'request_total_tokens': usage['total_tokens']}, ensure_ascii=False)}\n\n"
+
+                # 发送完成标记
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                # 发送错误信息
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -174,14 +193,16 @@ async def get_history(session_id: str):
 
     - **session_id**: 会话ID
     """
-    try:
-        history = await agent.get_history(session_id)
-        return HistoryResponse(
-            session_id=session_id,
-            history=history
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取历史记录时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            history = await agent.get_history(session_id)
+            return HistoryResponse(
+                session_id=session_id,
+                history=history,
+                request_total_tokens=get_request_token_usage()["total_tokens"]
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取历史记录时出错: {str(e)}")
 
 
 @app.delete("/history/{session_id}")
@@ -191,17 +212,19 @@ async def clear_history(session_id: str):
 
     - **session_id**: 会话ID
     """
-    try:
-        await agent.clear_history(session_id)
-        return {"message": f"会话 {session_id} 的历史记录已清除"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"清除历史记录时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            await agent.clear_history(session_id)
+            return _with_request_tokens({"message": f"会话 {session_id} 的历史记录已清除"})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"清除历史记录时出错: {str(e)}")
 
 
 @app.get("/health")
 async def health():
     """健康检查"""
-    return {
+    async with request_token_scope():
+        return _with_request_tokens({
         "status": "healthy",
         "agent_initialized": agent is not None,
         "storage_type": "SQLite",
@@ -209,7 +232,7 @@ async def health():
         "tools_count": len(agent.tools) if agent else 0,
         "langfuse_enabled": agent.langfuse_enabled if agent else False,
         "langfuse_sample_rate": getattr(agent, "langfuse_sample_rate", 0.0) if agent else 0.0,
-    }
+    })
 
 
 @app.get("/tools")
@@ -219,25 +242,26 @@ async def list_tools():
 
     返回系统中注册的所有工具及其描述
     """
-    try:
-        if agent is None:
-            raise HTTPException(status_code=500, detail="Agent 未初始化")
+    async with request_token_scope():
+        try:
+            if agent is None:
+                raise HTTPException(status_code=500, detail="Agent 未初始化")
 
-        if not agent.enable_tools:
-            return {
-                "enabled": False,
-                "message": "工具系统未启用",
-                "tools": []
-            }
+            if not agent.enable_tools:
+                return _with_request_tokens({
+                    "enabled": False,
+                    "message": "工具系统未启用",
+                    "tools": []
+                })
 
-        tools = agent.list_available_tools()
-        return {
-            "enabled": True,
-            "total": len(tools),
-            "tools": tools
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取工具列表时出错: {str(e)}")
+            tools = agent.list_available_tools()
+            return _with_request_tokens({
+                "enabled": True,
+                "total": len(tools),
+                "tools": tools
+            })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取工具列表时出错: {str(e)}")
 
 
 @app.get("/sessions")
@@ -247,14 +271,15 @@ async def list_sessions():
 
     返回数据库中所有的session_id列表
     """
-    try:
-        sessions = await agent.list_all_sessions()
-        return {
-            "total": len(sessions),
-            "sessions": sessions
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询会话列表时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            sessions = await agent.list_all_sessions()
+            return _with_request_tokens({
+                "total": len(sessions),
+                "sessions": sessions
+            })
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"查询会话列表时出错: {str(e)}")
 
 
 @app.get("/database/stats")
@@ -268,11 +293,12 @@ async def get_database_stats():
     - 数据库文件大小
     - 每个会话的详细信息
     """
-    try:
-        stats = await agent.get_database_stats()
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取数据库统计信息时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            stats = await agent.get_database_stats()
+            return _with_request_tokens(stats)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取数据库统计信息时出错: {str(e)}")
 
 
 @app.get("/database/sessions/{session_id}")
@@ -284,11 +310,12 @@ async def get_session_detail(session_id: str):
 
     返回该会话的所有checkpoint详细信息
     """
-    try:
-        detail = await agent.get_session_detail(session_id)
-        return detail
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取会话详细信息时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            detail = await agent.get_session_detail(session_id)
+            return _with_request_tokens(detail)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取会话详细信息时出错: {str(e)}")
 
 
 @app.get("/stats/tokens/{session_id}")
@@ -304,11 +331,12 @@ async def get_token_stats(session_id: str):
     - 总成本（美元）
     - 按模型分组的详细信息
     """
-    try:
-        stats = await agent.get_token_stats(session_id)
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取Token统计时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            stats = await agent.get_token_stats(session_id)
+            return _with_request_tokens(stats)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取Token统计时出错: {str(e)}")
 
 
 @app.get("/stats/tokens/daily")
@@ -324,11 +352,12 @@ async def get_daily_token_stats(date: str = None):
     - 总Token数
     - 总成本
     """
-    try:
-        stats = await agent.get_daily_token_stats(date)
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取每日统计时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            stats = await agent.get_daily_token_stats(date)
+            return _with_request_tokens(stats)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取每日统计时出错: {str(e)}")
 
 
 @app.get("/stats/tokens/monthly")
@@ -344,11 +373,12 @@ async def get_monthly_token_stats(year_month: str = None):
     - 总Token数
     - 总成本
     """
-    try:
-        stats = await agent.get_monthly_token_stats(year_month)
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取每月统计时出错: {str(e)}")
+    async with request_token_scope():
+        try:
+            stats = await agent.get_monthly_token_stats(year_month)
+            return _with_request_tokens(stats)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取每月统计时出错: {str(e)}")
 
 
 # ============================================================================
@@ -378,24 +408,25 @@ async def rag_query(request: RAGQueryRequest):
 
     返回基于知识库的答案及来源
     """
-    try:
-        if not rag_system._initialized:
-            raise HTTPException(
-                status_code=503,
-                detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置或查看启动日志"
+    async with request_token_scope():
+        try:
+            if not rag_system._initialized:
+                raise HTTPException(
+                    status_code=503,
+                    detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置或查看启动日志"
+                )
+
+            result = await rag_system.query(
+                question=request.question,
+                with_sources=request.with_sources
             )
 
-        result = await rag_system.query(
-            question=request.question,
-            with_sources=request.with_sources
-        )
+            return _with_request_tokens(result)
 
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RAG 查询失败: {str(e)}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"RAG 查询失败: {str(e)}")
 
 
 @app.post("/rag/rebuild")
@@ -405,23 +436,24 @@ async def rag_rebuild():
 
     清空并重新索引所有文档
     """
-    try:
-        if not rag_system._initialized:
-            raise HTTPException(
-                status_code=503,
-                detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置"
-            )
+    async with request_token_scope():
+        try:
+            if not rag_system._initialized:
+                raise HTTPException(
+                    status_code=503,
+                    detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置"
+                )
 
-        result = await rag_system.rebuild_knowledge_base()
-        return {
-            "message": "知识库全量重建完成",
-            **result
-        }
+            result = await rag_system.rebuild_knowledge_base()
+            return _with_request_tokens({
+                "message": "知识库全量重建完成",
+                **result
+            })
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"重建知识库失败: {str(e)}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"重建知识库失败: {str(e)}")
 
 
 @app.post("/rag/sync")
@@ -436,30 +468,31 @@ async def rag_sync():
 
     推荐：日常使用此接口，性能更好
     """
-    try:
-        if not rag_system._initialized:
-            raise HTTPException(
-                status_code=503,
-                detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置"
-            )
+    async with request_token_scope():
+        try:
+            if not rag_system._initialized:
+                raise HTTPException(
+                    status_code=503,
+                    detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置"
+                )
 
-        result = await rag_system.sync_knowledge_base()
+            result = await rag_system.sync_knowledge_base()
 
-        if result["has_changes"]:
-            return {
-                "message": "知识库智能同步完成",
-                **result
-            }
-        else:
-            return {
-                "message": "知识库无变更，跳过同步",
-                **result
-            }
+            if result["has_changes"]:
+                return _with_request_tokens({
+                    "message": "知识库智能同步完成",
+                    **result
+                })
+            else:
+                return _with_request_tokens({
+                    "message": "知识库无变更，跳过同步",
+                    **result
+                })
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"同步知识库失败: {str(e)}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"同步知识库失败: {str(e)}")
 
 
 @app.get("/rag/stats")
@@ -472,11 +505,12 @@ async def rag_stats():
     - 文档数量
     - 配置信息
     """
-    try:
-        stats = rag_system.get_stats()
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"获取 RAG 统计信息失败: {str(e)}")
+    async with request_token_scope():
+        try:
+            stats = rag_system.get_stats()
+            return _with_request_tokens(stats)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"获取 RAG 统计信息失败: {str(e)}")
 
 
 if __name__ == "__main__":
