@@ -356,13 +356,19 @@ class RAGSystem:
             logger.error(f"❌ 重建知识库失败: {e}")
             raise
 
-    async def query(self, question: str, with_sources: bool = True) -> Dict[str, Any]:
+    async def query(
+        self,
+        question: str,
+        with_sources: bool = True,
+        metadata_filter: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         RAG 查询
 
         Args:
             question: 用户问题
             with_sources: 是否返回来源信息
+            metadata_filter: 元数据过滤条件（例如 {"filename": "xxx.md"}）
 
         Returns:
             查询结果
@@ -371,20 +377,46 @@ class RAGSystem:
             raise RuntimeError("RAG 系统未初始化")
 
         try:
+            query_chain = self.rag_chain
+            if metadata_filter:
+                # 按请求构建带 metadata 过滤条件的 retriever，避免影响全局默认链路
+                retriever = self.vectorstore_manager.get_retriever(
+                    search_type=self.config.search_type,
+                    k=self.config.top_k,
+                    score_threshold=self.config.score_threshold,
+                    metadata_filter=metadata_filter
+                )
+                query_chain = RAGChain(
+                    llm=self.llm,
+                    retriever=retriever
+                )
+
             if with_sources:
-                return await self.rag_chain.ainvoke_with_sources(question)
+                return await query_chain.ainvoke_with_sources(question)
             else:
-                answer = await self.rag_chain.ainvoke(question)
+                answer = await query_chain.ainvoke(question)
                 return {"answer": answer}
         except Exception as e:
             # 部分场景下（如重建后）旧 retriever 仍指向已删除 collection，自动刷新并重试一次
             if "collection not initialized" in str(e).lower():
                 logger.warning("检测到 collection 未初始化，刷新 retriever 后重试一次")
                 self._rebuild_rag_chain()
+                query_chain = self.rag_chain
+                if metadata_filter:
+                    retriever = self.vectorstore_manager.get_retriever(
+                        search_type=self.config.search_type,
+                        k=self.config.top_k,
+                        score_threshold=self.config.score_threshold,
+                        metadata_filter=metadata_filter
+                    )
+                    query_chain = RAGChain(
+                        llm=self.llm,
+                        retriever=retriever
+                    )
                 if with_sources:
-                    return await self.rag_chain.ainvoke_with_sources(question)
+                    return await query_chain.ainvoke_with_sources(question)
                 else:
-                    answer = await self.rag_chain.ainvoke(question)
+                    answer = await query_chain.ainvoke(question)
                     return {"answer": answer}
             raise
 

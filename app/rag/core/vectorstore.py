@@ -270,7 +270,8 @@ class VectorStoreManager:
         self,
         search_type: str = "similarity",
         k: int = 4,
-        score_threshold: float = 0.5
+        score_threshold: float = 0.5,
+        metadata_filter: Optional[dict] = None
     ):
         """
         获取检索器
@@ -279,6 +280,7 @@ class VectorStoreManager:
             search_type: 搜索类型 (similarity, mmr, similarity_score_threshold)
             k: 返回文档数量
             score_threshold: 相似度阈值（仅用于 similarity_score_threshold）
+            metadata_filter: 元数据过滤条件（传递给 Chroma filter）
 
         Returns:
             检索器实例
@@ -287,13 +289,18 @@ class VectorStoreManager:
 
         if search_type == "similarity_score_threshold":
             search_kwargs["score_threshold"] = score_threshold
+        if metadata_filter:
+            search_kwargs["filter"] = metadata_filter
 
         retriever = self.vectorstore.as_retriever(
             search_type=search_type,
             search_kwargs=search_kwargs
         )
 
-        logger.info(f"创建检索器: search_type={search_type}, k={k}")
+        logger.info(
+            f"创建检索器: search_type={search_type}, k={k}, "
+            f"metadata_filter={'yes' if metadata_filter else 'no'}"
+        )
         return retriever
 
     def get_stats(self) -> dict:

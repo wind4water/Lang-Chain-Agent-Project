@@ -389,6 +389,10 @@ class RAGQueryRequest(BaseModel):
     """RAG 查询请求"""
     question: str = Field(..., description="用户问题")
     with_sources: bool = Field(default=True, description="是否返回来源信息")
+    metadata_filter: dict | None = Field(
+        default=None,
+        description="可选的元数据过滤条件（Chroma filter），例如 {\"filename\": \"README.md\"}"
+    )
 
 
 class RAGQueryResponse(BaseModel):
@@ -405,6 +409,7 @@ async def rag_query(request: RAGQueryRequest):
 
     - **question**: 用户问题
     - **with_sources**: 是否返回来源信息（默认 true）
+    - **metadata_filter**: 可选元数据过滤条件（例如 `{\"extension\": \".md\"}`）
 
     返回基于知识库的答案及来源
     """
@@ -418,7 +423,8 @@ async def rag_query(request: RAGQueryRequest):
 
             result = await rag_system.query(
                 question=request.question,
-                with_sources=request.with_sources
+                with_sources=request.with_sources,
+                metadata_filter=request.metadata_filter
             )
 
             return _with_request_tokens(result)

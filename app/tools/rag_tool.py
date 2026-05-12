@@ -4,7 +4,7 @@ RAG 知识库搜索工具
 作为 LangChain Tool 集成到 Agent 中，让 Agent 可以自动调用知识库
 """
 from langchain.tools import BaseTool
-from typing import Optional, Type, Any
+from typing import Optional, Type, Any, Dict
 from pydantic import BaseModel, Field, ConfigDict
 import logging
 
@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 class RAGSearchInput(BaseModel):
     """RAG 搜索工具的输入参数"""
     query: str = Field(description="要在知识库中搜索的问题或关键词")
+    metadata_filter: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="可选元数据过滤条件（Chroma filter），例如 {'filename': 'README.md'}"
+    )
 
 
 class RAGSearchTool(BaseTool):
@@ -49,17 +53,17 @@ class RAGSearchTool(BaseTool):
         from app.rag import rag_system
         self.rag_system = rag_system
 
-    def _run(self, query: str) -> str:
+    def _run(self, query: str, metadata_filter: Optional[Dict[str, Any]] = None) -> str:
         """同步执行（LangChain Tool 要求实现，但不推荐使用）"""
         import asyncio
         try:
             # 同步环境下运行异步代码
-            return asyncio.run(self._arun(query))
+            return asyncio.run(self._arun(query, metadata_filter))
         except Exception as e:
             logger.error(f"RAG 工具同步调用失败: {e}")
             return f"知识库搜索失败: {str(e)}"
 
-    async def _arun(self, query: str) -> str:
+    async def _arun(self, query: str, metadata_filter: Optional[Dict[str, Any]] = None) -> str:
         """异步执行 RAG 搜索"""
         try:
             # 检查 RAG 系统是否初始化
@@ -67,12 +71,13 @@ class RAGSearchTool(BaseTool):
                 logger.warning("RAG 系统未初始化")
                 return "❌ 知识库系统未启用。请联系管理员配置 RAG_ENABLED=true"
 
-            logger.info(f"🔍 RAG 工具被调用: {query}")
+            logger.info(f"🔍 RAG 工具被调用: {query}, metadata_filter={metadata_filter}")
 
             # 调用 RAG 系统查询（带来源）
             result = await self.rag_system.query(
                 question=query,
-                with_sources=True
+                with_sources=True,
+                metadata_filter=metadata_filter
             )
 
             # 构建返回结果
