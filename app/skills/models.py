@@ -15,9 +15,11 @@ class SkillDefinition:
     description: str = ""
     tool_scene_keywords: list[str] = field(default_factory=list)
     hide_sources: bool = True
+    style_instruction: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SkillDefinition":
+        response_config = payload.get("response", {})
         return cls(
             skill_id=str(payload.get("id", "")).strip(),
             name=str(payload.get("name", "")).strip(),
@@ -29,5 +31,6 @@ class SkillDefinition:
                 for x in (payload.get("tool_scene_keywords") or [])
                 if str(x).strip()
             ],
-            hide_sources=bool(payload.get("response", {}).get("hide_sources", True)),
+            hide_sources=bool(response_config.get("hide_sources", True)),
+            style_instruction=str(payload.get("style_instruction", "")),
         )

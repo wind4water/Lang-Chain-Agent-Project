@@ -13,6 +13,7 @@ class SkillLoader:
     def __init__(self, skills_dir: Optional[Path] = None):
         base_dir = Path(__file__).resolve().parent
         self.skills_dir = skills_dir or (base_dir / "defs")
+        self.sensitive_dir = base_dir / "sensitive"
         self._cache: dict[str, SkillDefinition] = {}
 
     def get(self, skill_id: str) -> Optional[SkillDefinition]:
@@ -22,7 +23,12 @@ class SkillLoader:
         if key in self._cache:
             return self._cache[key]
 
-        file_path = self.skills_dir / f"{key}.json"
+        # 优先从 sensitive 目录加载
+        file_path = self.sensitive_dir / f"{key}.json"
+        if not file_path.exists():
+            # 回退到 defs 目录
+            file_path = self.skills_dir / f"{key}.json"
+
         if not file_path.exists():
             return None
 

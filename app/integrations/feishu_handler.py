@@ -150,6 +150,46 @@ class FeishuHandler:
         async with lock:
             await self._process_message(user_id, chat_id, is_group, text, image_key, data)
 
+    async def _stream_response(
+        self,
+        agent: object,
+        text: str,
+        session_id: str,
+        card_msg_id: str
+    ) -> None:
+        """流式输出响应"""
+        accumulated = ""
+        chars_since_push = 0
+        last_push_time = time.time()
+
+        try:
+            async for chunk in agent.chat_stream(text, session_id):
+                accumulated += chunk
+                chars_since_push += len(chunk)
+
+                # 按字符数或时间间隔推送
+                now = time.time()
+                interval_sec = self.config.stream_interval_ms / 1000.0
+
+                if (chars_since_push >= self.config.stream_chunk_size or
+                        now - last_push_time >= interval_sec):
+                    await self.client.update_card(card_msg_id, accumulated)
+                    chars_since_push = 0
+                    last_push_time = now
+
+            # 最终更新
+            if accumulated:
+                await self.client.update_card(card_msg_id, accumulated)
+            else:
+                await self.client.update_card(card_msg_id, "（无回复内容）")
+
+        except Exception as e:
+            print(f"[feishu] 流式处理失败: {e}", flush=True)
+            try:
+                await self.client.update_card(card_msg_id, f"❌ 处理出错: {e}")
+            except Exception:
+                pass
+
     async def _process_message(
         self,
         user_id: str,
@@ -223,12 +263,17 @@ class FeishuHandler:
             print(f"[feishu] 发送占位卡片失败: {e}", flush=True)
             return
 
+        # 应用 skill 的风格指令（注入到用户消息前）
+        query_text = text
+        if self._active_skill and self._active_skill.style_instruction:
+            query_text = f"{self._active_skill.style_instruction}\n\n用户问题: {text}"
+
         # 流式调用 Agent
         if self._active_skill and self._active_skill.strategy == "rag_first_then_tool_summary":
             try:
                 skill_answer = await self._run_rag_first_skill(
                     agent=agent,
-                    user_text=text,
+                    user_text=query_text,
                     session_id=session_id,
                     skill=self._active_skill,
                 )
@@ -237,37 +282,8 @@ class FeishuHandler:
             except Exception as e:
                 print(f"[feishu] skill 执行失败，回退默认链路: {e}", flush=True)
 
-        accumulated = ""
-        chars_since_push = 0
-        last_push_time = time.time()
-
-        try:
-            async for chunk in agent.chat_stream(text, session_id):
-                accumulated += chunk
-                chars_since_push += len(chunk)
-
-                # 按字符数或时间间隔推送
-                now = time.time()
-                interval_sec = self.config.stream_interval_ms / 1000.0
-
-                if (chars_since_push >= self.config.stream_chunk_size or
-                        now - last_push_time >= interval_sec):
-                    await self.client.update_card(card_msg_id, accumulated)
-                    chars_since_push = 0
-                    last_push_time = now
-
-            # 最终更新
-            if accumulated:
-                await self.client.update_card(card_msg_id, accumulated)
-            else:
-                await self.client.update_card(card_msg_id, "（无回复内容）")
-
-        except Exception as e:
-            print(f"[feishu] 流式处理失败: {e}", flush=True)
-            try:
-                await self.client.update_card(card_msg_id, f"❌ 处理出错: {e}")
-            except Exception:
-                pass
+        # 默认流式输出流程
+        await self._stream_response(agent, query_text, session_id, card_msg_id)
 
     @staticmethod
     def _sanitize_answer(text: str) -> str:
