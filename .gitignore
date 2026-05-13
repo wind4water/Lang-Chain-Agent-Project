@@ -52,3 +52,4 @@ docs/
 # Data files (documents and vector databases)
 data/
 app/data/
+app/skills

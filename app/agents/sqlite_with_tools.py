@@ -137,6 +137,10 @@ class SqliteAgentWithTools:
             llm_kwargs["http_async_client"] = _http_async_client
             llm_kwargs["http_client"] = _http_client
         self.llm = ChatOpenAI(**llm_kwargs)
+        self.tool_call_temperature = float(os.getenv("TOOL_CALL_TEMPERATURE", "0.1"))
+        tool_llm_kwargs = dict(llm_kwargs)
+        tool_llm_kwargs["temperature"] = self.tool_call_temperature
+        self.tool_call_llm = ChatOpenAI(**tool_llm_kwargs)
 
         # ============ Langfuse 配置和初始化 ============
         self.langfuse_enabled = False
@@ -239,6 +243,7 @@ class SqliteAgentWithTools:
         print(f"✅ 配置持久化存储：{os.path.abspath(db_path)}")
         print(f"✅ 上下文压缩策略: {self.compression_strategy}")
         print(f"✅ 工具调用: {'启用' if enable_tools else '禁用'}")
+        print(f"✅ 工具调用温度: {self.tool_call_temperature}")
 
     def _create_run_callbacks(self, session_id: str, user_message: str, stream: bool):
         """构建本次请求 callbacks（Langfuse 自动链路 + tool 事件采集）。"""
@@ -317,7 +322,7 @@ class SqliteAgentWithTools:
             # 使用 create_react_agent 创建支持工具的 agent
             if self.enable_tools and len(self.tools) > 0:
                 # 绑定工具到 LLM
-                llm_with_tools = self.llm.bind_tools(self.tools)
+                llm_with_tools = self.tool_call_llm.bind_tools(self.tools)
 
                 # 创建系统消息
                 system_message = """你是一个智能助手，可以使用工具来帮助回答问题。
@@ -332,6 +337,12 @@ class SqliteAgentWithTools:
 2. 选择合适的工具
 3. 调用工具并获取结果
 4. 根据结果回答用户的问题
+
+工具调用强约束（必须遵守）:
+- 调用 knowledge_base_search 时，query 必须尽量保持用户原句，禁止改写人名、专有名词和关键短语。
+- 不允许把中文词语改写成错别字/同音字（例如把“口头禅”改写为其他词）。
+- 调用 knowledge_base_search 时，必须同时传入 original_query，值为用户的原始问题全文。
+- 如果需要做检索增强，只能在不改变原句语义的前提下做轻微补充，且优先保留原句。
 
 如果不需要工具，直接回答即可。
 """

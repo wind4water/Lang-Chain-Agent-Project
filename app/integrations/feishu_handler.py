@@ -5,6 +5,7 @@ WebSocket 长连接模式，接收飞书消息并调用 Agent 回复
 """
 import asyncio
 import os
+import re
 import ssl
 import time
 from typing import Optional, Callable
@@ -14,6 +15,7 @@ from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
 from app.integrations.feishu_config import FeishuConfig
 from app.integrations.feishu_client import FeishuClient
+from app.skills import SkillLoader, SkillDefinition
 
 
 # per-chat 消息队列锁，保证同一群组的消息串行处理，允许不同群组并发
@@ -99,6 +101,9 @@ class FeishuHandler:
         self.client = client
         self.get_agent = get_agent
         self.main_loop = main_loop
+        self._skill_loader = SkillLoader()
+        self._active_skill_id = os.getenv("FEISHU_SKILL_ID", "feishu_rag_first").strip()
+        self._active_skill: Optional[SkillDefinition] = self._skill_loader.get(self._active_skill_id)
         self._ws_client: Optional[lark.ws.Client] = None
         self._running = False
 
@@ -163,6 +168,31 @@ class FeishuHandler:
         # 构建 session_id（飞书用户/群组唯一标识）
         session_id = f"feishu:{chat_id}"
 
+        normalized_text = (text or "").strip().lower()
+        if normalized_text in {"/clear", "/reset"}:
+            try:
+                await agent.clear_history(session_id)
+                clear_msg = "✅ 已清除当前会话上下文。"
+            except Exception as e:
+                clear_msg = f"❌ 清除会话失败: {e}"
+
+            try:
+                if is_group:
+                    await self.client.reply_card(
+                        event.event.message.message_id,
+                        content=clear_msg,
+                        loading=False,
+                    )
+                else:
+                    await self.client.send_card_to_user(
+                        user_id,
+                        content=clear_msg,
+                        loading=False,
+                    )
+            except Exception as e:
+                print(f"[feishu] 发送清空提示失败: {e}", flush=True)
+            return
+
         # 处理图片
         if image_key and image_key != "[图片]":
             try:
@@ -194,6 +224,19 @@ class FeishuHandler:
             return
 
         # 流式调用 Agent
+        if self._active_skill and self._active_skill.strategy == "rag_first_then_tool_summary":
+            try:
+                skill_answer = await self._run_rag_first_skill(
+                    agent=agent,
+                    user_text=text,
+                    session_id=session_id,
+                    skill=self._active_skill,
+                )
+                await self.client.update_card(card_msg_id, skill_answer or "（无回复内容）")
+                return
+            except Exception as e:
+                print(f"[feishu] skill 执行失败，回退默认链路: {e}", flush=True)
+
         accumulated = ""
         chars_since_push = 0
         last_push_time = time.time()
@@ -225,6 +268,76 @@ class FeishuHandler:
                 await self.client.update_card(card_msg_id, f"❌ 处理出错: {e}")
             except Exception:
                 pass
+
+    @staticmethod
+    def _sanitize_answer(text: str) -> str:
+        if not text:
+            return ""
+        lines = []
+        for line in text.splitlines():
+            normalized = line.strip()
+            if not normalized:
+                lines.append(line)
+                continue
+            if normalized.startswith("📄") or normalized.startswith("参考来源"):
+                continue
+            if "来源" in normalized and normalized.startswith(("1.", "2.", "3.", "-", "*")):
+                continue
+            lines.append(line)
+        cleaned = "\n".join(lines)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
+
+    async def _run_rag_first_skill(
+        self,
+        agent: object,
+        user_text: str,
+        session_id: str,
+        skill: SkillDefinition,
+    ) -> str:
+        """
+        执行 skill: 先走 RAG，再按场景允许工具补充，最后生成答案。
+        """
+        from app.rag import rag_system
+
+        rag_answer = ""
+        rag_sources = []
+        if getattr(rag_system, "_initialized", False):
+            rag_result = await rag_system.query(question=user_text, with_sources=True)
+            rag_answer = rag_result.get("answer", "") or ""
+            rag_sources = rag_result.get("sources", []) or []
+
+        source_preview = []
+        for src in rag_sources[:3]:
+            filename = src.get("filename", "unknown")
+            preview = (src.get("content_preview", "") or "")[:120]
+            source_preview.append(f"- {filename}: {preview}")
+        source_text = "\n".join(source_preview) if source_preview else "无"
+
+        should_allow_tool = any(k in (user_text or "").lower() for k in skill.tool_scene_keywords)
+        tool_rule = (
+            "你可以按需调用工具补充实时信息，但优先使用 RAG 信息。"
+            if should_allow_tool
+            else "本轮原则上不调用外部工具，优先使用 RAG 信息直接回答。"
+        )
+
+        synthesis_prompt = (
+            "你正在处理飞书问答。请按以下流程：\n"
+            "1) 优先参考 RAG 结果；\n"
+            "2) 若确实缺少实时信息，再考虑调用工具；\n"
+            "3) 最终给出直接答案。\n\n"
+            f"{tool_rule}\n\n"
+            f"用户问题：{user_text}\n\n"
+            f"RAG答案：{rag_answer or '无'}\n"
+            f"RAG来源片段：\n{source_text}\n\n"
+            "输出要求：只输出最终答案，不要输出来源、参考文档、推理过程。"
+        )
+
+        answer = await agent.chat(synthesis_prompt, session_id)
+        answer = answer or rag_answer or "抱歉，我暂时无法回答这个问题。"
+        if skill.hide_sources:
+            answer = self._sanitize_answer(answer)
+        return answer
 
     # ------------------------------------------------------------------
     # 启动 / 停止
