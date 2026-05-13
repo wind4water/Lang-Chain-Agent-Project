@@ -8,7 +8,7 @@ SqliteAgent with Tool Calling
 3. 上下文压缩 - 支持多种压缩策略
 """
 
-from typing import Annotated, List
+from typing import Annotated, List, Optional, Any
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -24,8 +24,9 @@ from app.tools.loader import load_all_tools
 from app.token_usage import record_llm_token_usage
 
 # ============ Langfuse 集成 ============
-from typing import Optional
 import logging
+import random
+from langchain_core.callbacks import BaseCallbackHandler
 
 # 条件导入 Langfuse（不强制依赖）
 try:
@@ -34,6 +35,19 @@ try:
 except ImportError:
     LANGFUSE_AVAILABLE = False
     Langfuse = None
+
+try:
+    # Langfuse LangChain 回调（优先新版导入路径）
+    from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
+    LANGFUSE_CALLBACK_AVAILABLE = True
+except ImportError:
+    try:
+        # 兼容部分版本
+        from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
+        LANGFUSE_CALLBACK_AVAILABLE = True
+    except ImportError:
+        LANGFUSE_CALLBACK_AVAILABLE = False
+        LangfuseCallbackHandler = None
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +77,46 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
 
 
+class ToolEventCollectorCallback(BaseCallbackHandler):
+    """轻量工具事件采集器：记录关键工具输入/输出摘要，便于诊断。"""
+
+    def __init__(self, max_events: int = 20, max_text_length: int = 300):
+        self.max_events = max_events
+        self.max_text_length = max_text_length
+        self.events: list[dict[str, Any]] = []
+
+    def _clip(self, value: Any) -> str:
+        text = str(value)
+        if len(text) > self.max_text_length:
+            return text[:self.max_text_length] + "...(truncated)"
+        return text
+
+    def _append_event(self, payload: dict[str, Any]) -> None:
+        if len(self.events) >= self.max_events:
+            return
+        self.events.append(payload)
+
+    def on_tool_start(self, serialized: dict, input_str: str, **kwargs: Any) -> Any:
+        tool_name = (serialized or {}).get("name") or kwargs.get("name") or "unknown_tool"
+        self._append_event({
+            "phase": "start",
+            "tool_name": tool_name,
+            "input_preview": self._clip(input_str),
+        })
+
+    def on_tool_end(self, output: Any, **kwargs: Any) -> Any:
+        self._append_event({
+            "phase": "end",
+            "output_preview": self._clip(output),
+        })
+
+    def on_tool_error(self, error: BaseException, **kwargs: Any) -> Any:
+        self._append_event({
+            "phase": "error",
+            "error": self._clip(error),
+        })
+
+
 class SqliteAgentWithTools:
     """支持工具调用的持久化对话Agent"""
 
@@ -90,6 +144,7 @@ class SqliteAgentWithTools:
         self.langfuse_public_key = None
         self.langfuse_secret_key = None
         self.langfuse_host = None
+        self.langfuse_callback_enabled = False
 
         # 检查是否启用 Langfuse
         if os.getenv("LANGFUSE_ENABLED", "false").lower() == "true":
@@ -125,8 +180,13 @@ class SqliteAgentWithTools:
                         self.langfuse_client = Langfuse(**langfuse_kwargs)
                         self.langfuse_enabled = True
                         self.langfuse_sample_rate = float(os.getenv("LANGFUSE_SAMPLE_RATE", "1.0"))
+                        self.langfuse_callback_enabled = LANGFUSE_CALLBACK_AVAILABLE
 
                         logger.info("✅ Langfuse 监控已启用")
+                        if self.langfuse_callback_enabled:
+                            logger.info("✅ Langfuse callback 已启用（自动采集 tool/chain 调用）")
+                        else:
+                            logger.warning("⚠️ 未检测到 Langfuse callback，自动 tool 链路采集不可用")
                         print(f"✅ Langfuse 监控已启用 (采样率: {self.langfuse_sample_rate*100:.0f}%)")
 
                 except Exception as e:
@@ -180,40 +240,71 @@ class SqliteAgentWithTools:
         print(f"✅ 上下文压缩策略: {self.compression_strategy}")
         print(f"✅ 工具调用: {'启用' if enable_tools else '禁用'}")
 
-    def _create_langfuse_callback(self, session_id: str, user_message: str = None):
-        """返回 Langfuse callback handler
+    def _create_run_callbacks(self, session_id: str, user_message: str, stream: bool):
+        """构建本次请求 callbacks（Langfuse 自动链路 + tool 事件采集）。"""
+        callbacks: list[Any] = []
+        tool_collector = ToolEventCollectorCallback()
+        callbacks.append(tool_collector)
 
-        Langfuse 2.x 使用 OpenTelemetry 集成，不再使用 CallbackHandler。
-        这里返回 None，追踪通过手动方式在 chat 方法中处理。
+        langfuse_callback_active = False
+        if (
+            self.langfuse_enabled
+            and self.langfuse_callback_enabled
+            and self.langfuse_public_key
+            and self.langfuse_secret_key
+            and random.random() <= self.langfuse_sample_rate
+        ):
+            trace_name = user_message[:50] + "..." if len(user_message) > 50 else user_message
+            try:
+                # Langfuse 4.x 的 LangChain CallbackHandler 仅支持少量构造参数，
+                # session_id/trace_name/tags 通过 LangChain metadata/tags 透传。
+                handler = LangfuseCallbackHandler(public_key=self.langfuse_public_key)
+                callbacks.append(handler)
+                langfuse_callback_active = True
+            except Exception as e:
+                logger.warning("Langfuse callback 创建失败，回退手动 observation: %s", e)
 
-        Args:
-            session_id: 会话ID
-            user_message: 用户消息
+        run_metadata = {
+            "langfuse_session_id": session_id,
+            "langfuse_trace_name": user_message[:50] + "..." if len(user_message) > 50 else user_message,
+            "session_id": session_id,
+            "enable_tools": self.enable_tools,
+            "stream": stream,
+            "trace_mode": "callback" if langfuse_callback_active else "manual_fallback",
+        }
+        run_tags = ["stream" if stream else "chat", "langgraph", "tool-calling"]
 
-        Returns:
-            None (Langfuse 2.x 不使用 callback handler)
-        """
+        return callbacks, tool_collector, langfuse_callback_active, run_metadata, run_tags
+
+    def _create_manual_observation(
+        self,
+        session_id: str,
+        message: str,
+        stream: bool = False,
+    ):
+        """手动 observation 兜底（当 callback 不可用时使用）。"""
         if not self.langfuse_enabled or not self.langfuse_client:
             return None
-
-        # 采样控制
-        import random
-        sample = random.random()
-        if sample > self.langfuse_sample_rate:
+        if random.random() > self.langfuse_sample_rate:
             return None
 
-        # 记录追踪信息
-        trace_name = f"chat_{session_id}"
-        if user_message:
-            preview = user_message[:50] + "..." if len(user_message) > 50 else user_message
-            trace_name = preview
-
-        logger.info("🔵 Langfuse 追踪: session_id=%s, trace_name=%s",
-                   session_id, trace_name)
-
-        # Langfuse 2.x 不使用 callback handler，返回 None
-        # 追踪在 chat 方法中通过 langfuse_client 手动处理
-        return None
+        try:
+            trace_name = message[:50] + "..." if len(message) > 50 else message
+            return self.langfuse_client.start_observation(
+                name=trace_name,
+                as_type="generation",
+                model=self.llm.model_name,
+                input={"message": message},
+                metadata={
+                    "session_id": session_id,
+                    "enable_tools": self.enable_tools,
+                    "stream": stream,
+                    "trace_mode": "manual_fallback",
+                },
+            )
+        except Exception as e:
+            logger.warning("Langfuse manual observation 创建失败: %s", e)
+            return None
 
     async def _ensure_initialized(self):
         """确保checkpointer和graph已初始化"""
@@ -374,31 +465,28 @@ class SqliteAgentWithTools:
         """处理用户消息（包含Token统计和Langfuse追踪）"""
         await self._ensure_initialized()
 
-        # ============ Langfuse 2.x: 手动追踪 ============
-        observation = None
-        if self.langfuse_enabled and self.langfuse_client:
-            import random
-            if random.random() <= self.langfuse_sample_rate:
-                try:
-                    trace_name = message[:50] + "..." if len(message) > 50 else message
-                    observation = self.langfuse_client.start_observation(
-                        name=trace_name,
-                        as_type="generation",
-                        model=self.llm.model_name,
-                        input={"message": message},
-                        metadata={
-                            "session_id": session_id,
-                            "enable_tools": self.enable_tools,
-                        },
-                    )
-                    logger.info("🟢 Langfuse generation 已创建")
-                except Exception as e:
-                    logger.warning(f"Langfuse generation 创建失败: {e}")
-        # ===============================================
+        callbacks, tool_collector, callback_active, run_metadata, run_tags = self._create_run_callbacks(
+            session_id=session_id,
+            user_message=message,
+            stream=False,
+        )
+        observation = None if callback_active else self._create_manual_observation(
+            session_id=session_id,
+            message=message,
+            stream=False,
+        )
+        if callback_active:
+            logger.info("🟢 Langfuse callback tracing 已启用（chat）")
+        elif observation:
+            logger.info("🟢 Langfuse manual observation 已启用（chat fallback）")
 
         config = {
             "configurable": {"thread_id": session_id},
+            "metadata": run_metadata,
+            "tags": run_tags,
         }
+        if callbacks:
+            config["callbacks"] = callbacks
         user_message = HumanMessage(content=message)
 
         # 记录请求开始时间
@@ -466,6 +554,9 @@ class SqliteAgentWithTools:
                 response_text = ai_message.content if ai_message else ""
                 observation.update(
                     output={"response": response_text},
+                    metadata={
+                        "tool_events": tool_collector.events,
+                    },
                     usage_details={
                         "input": prompt_tokens,
                         "output": completion_tokens,
@@ -881,28 +972,28 @@ class SqliteAgentWithTools:
         """
         await self._ensure_initialized()
 
-        # ============ Langfuse 2.x: 手动追踪 ============
-        observation = None
-        if self.langfuse_enabled and self.langfuse_client:
-            import random
-            if random.random() <= self.langfuse_sample_rate:
-                try:
-                    trace_name = message[:50] + "..." if len(message) > 50 else message
-                    observation = self.langfuse_client.start_observation(
-                        name=trace_name,
-                        as_type="generation",
-                        model=self.llm.model_name,
-                        input={"message": message},
-                        metadata={"session_id": session_id, "stream": True},
-                    )
-                    logger.info("🟢 Langfuse generation 已创建（流式）")
-                except Exception as e:
-                    logger.warning(f"Langfuse generation 创建失败: {e}")
-        # ===============================================
+        callbacks, tool_collector, callback_active, run_metadata, run_tags = self._create_run_callbacks(
+            session_id=session_id,
+            user_message=message,
+            stream=True,
+        )
+        observation = None if callback_active else self._create_manual_observation(
+            session_id=session_id,
+            message=message,
+            stream=True,
+        )
+        if callback_active:
+            logger.info("🟢 Langfuse callback tracing 已启用（stream）")
+        elif observation:
+            logger.info("🟢 Langfuse manual observation 已启用（stream fallback）")
 
         config = {
             "configurable": {"thread_id": session_id},
+            "metadata": run_metadata,
+            "tags": run_tags,
         }
+        if callbacks:
+            config["callbacks"] = callbacks
         user_message = HumanMessage(content=message)
 
         # 用于累积完整响应（用于后续保存Token统计）
@@ -966,6 +1057,7 @@ class SqliteAgentWithTools:
                 try:
                     observation.update(
                         output={"response": full_response},
+                        metadata={"tool_events": tool_collector.events},
                         usage_details={
                             "input": prompt_tokens,
                             "output": completion_tokens,
