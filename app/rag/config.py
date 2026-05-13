@@ -48,9 +48,17 @@ class RAGConfig(BaseModel):
         default_factory=lambda: os.getenv("RAG_SEARCH_TYPE", "similarity"),
         description="搜索类型: similarity, mmr, similarity_score_threshold"
     )
+    retrieval_mode: str = Field(
+        default_factory=lambda: os.getenv("RAG_RETRIEVAL_MODE", "vector"),
+        description="检索模式: vector, hybrid"
+    )
     score_threshold: float = Field(
         default_factory=lambda: float(os.getenv("RAG_SCORE_THRESHOLD", "0.5")),
         description="相似度阈值"
+    )
+    hybrid_keyword_k: int = Field(
+        default_factory=lambda: int(os.getenv("RAG_HYBRID_KEYWORD_K", "8")),
+        description="Hybrid 模式下关键词召回候选数量"
     )
 
     # 文本分割配置

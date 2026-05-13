@@ -14,6 +14,21 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 import os
 import aiosqlite
+import httpx
+import urllib3
+import logging
+
+logger = logging.getLogger(__name__)
+
+# SSL 验证配置（默认启用）
+_SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
+_http_async_client = None
+_http_client = None
+if not _SSL_VERIFY:
+    logger.warning("⚠️ SSL 证书验证已禁用（SSL_VERIFY=false）")
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    _http_async_client = httpx.AsyncClient(verify=False)
+    _http_client = httpx.Client(verify=False)
 
 
 class State(TypedDict):
@@ -31,12 +46,16 @@ class SqliteAgent:
             raise ValueError("❌ 未配置API密钥！")
 
         # 初始化LLM
-        self.llm = ChatOpenAI(
-            model=os.getenv("MODEL_NAME", "gpt-4o-mini"),
-            temperature=0.7,
-            api_key=api_key,
-            base_url=os.getenv("OPENAI_BASE_URL")
-        )
+        llm_kwargs = {
+            "model": os.getenv("MODEL_NAME", "gpt-4o-mini"),
+            "temperature": 0.7,
+            "api_key": api_key,
+            "base_url": os.getenv("OPENAI_BASE_URL"),
+        }
+        if not _SSL_VERIFY:
+            llm_kwargs["http_async_client"] = _http_async_client
+            llm_kwargs["http_client"] = _http_client
+        self.llm = ChatOpenAI(**llm_kwargs)
 
         # 创建Prompt模板
         self.prompt = ChatPromptTemplate.from_messages([
@@ -60,12 +79,16 @@ class SqliteAgent:
         # 如果使用摘要策略，初始化摘要LLM（使用更便宜的模型）
         self.summary_llm = None
         if self.compression_strategy == "summary":
-            self.summary_llm = ChatOpenAI(
-                model=os.getenv("SUMMARY_MODEL_NAME", "gpt-4o-mini"),
-                temperature=0.3,
-                api_key=api_key,
-                base_url=os.getenv("OPENAI_BASE_URL")
-            )
+            summary_kwargs = {
+                "model": os.getenv("SUMMARY_MODEL_NAME", "gpt-4o-mini"),
+                "temperature": 0.3,
+                "api_key": api_key,
+                "base_url": os.getenv("OPENAI_BASE_URL"),
+            }
+            if not _SSL_VERIFY:
+                summary_kwargs["http_async_client"] = _http_async_client
+                summary_kwargs["http_client"] = _http_client
+            self.summary_llm = ChatOpenAI(**summary_kwargs)
 
         # checkpointer 将在首次使用时异步初始化
         self._conn = None

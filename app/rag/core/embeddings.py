@@ -6,8 +6,18 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_core.embeddings import Embeddings
 import os
 import logging
+import httpx
+import urllib3
 
 logger = logging.getLogger(__name__)
+
+# SSL 验证配置（默认启用）
+_SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
+_http_client = None
+if not _SSL_VERIFY:
+    logger.warning("⚠️ SSL 证书验证已禁用（SSL_VERIFY=false）")
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    _http_client = httpx.Client(verify=False)
 
 
 class EmbeddingManager:
@@ -41,11 +51,14 @@ class EmbeddingManager:
         """获取嵌入模型实例（懒加载）"""
         if self._embeddings is None:
             logger.info(f"初始化嵌入模型: {self.model_name}")
-            self._embeddings = OpenAIEmbeddings(
-                model=self.model_name,
-                api_key=self.api_key,
-                base_url=self.base_url
-            )
+            emb_kwargs = {
+                "model": self.model_name,
+                "api_key": self.api_key,
+                "base_url": self.base_url,
+            }
+            if not _SSL_VERIFY:
+                emb_kwargs["http_client"] = _http_client
+            self._embeddings = OpenAIEmbeddings(**emb_kwargs)
         return self._embeddings
 
     def embed_query(self, text: str) -> list[float]:

@@ -35,6 +35,11 @@ import json
 agent = None
 
 
+def _get_agent():
+    """供外部集成模块获取当前 Agent 实例。"""
+    return agent
+
+
 def _with_request_tokens(payload: dict) -> dict:
     """为接口返回追加本次请求 token 汇总字段。"""
     result = dict(payload)
@@ -73,6 +78,7 @@ app = FastAPI(
 )
 
 
+
 # 请求模型
 class ChatRequest(BaseModel):
     message: str = Field(..., description="用户消息")
@@ -104,7 +110,7 @@ async def root():
                 "Persistent Storage - SQLite 持久化",
                 "Multi-Session - 多会话管理",
                 "Token Statistics - Token使用统计和成本追踪",
-                "RAG - 检索增强生成（知识库问答）"
+                "RAG - 检索增强生成（知识库问答）",
             ],
             "endpoints": {
                 "POST /chat": "发送消息进行对话",
@@ -122,7 +128,7 @@ async def root():
                 "POST /rag/query": "RAG 知识库问答",
                 "POST /rag/rebuild": "重建知识库（全量）",
                 "POST /rag/sync": "智能同步知识库（增量更新）⭐推荐",
-                "GET /rag/stats": "RAG 系统统计信息"
+                "GET /rag/stats": "RAG 系统统计信息",
             }
         })
 

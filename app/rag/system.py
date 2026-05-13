@@ -9,6 +9,7 @@ import logging
 from app.rag.config import rag_config
 from app.rag.core.embeddings import EmbeddingManager
 from app.rag.core.vectorstore import VectorStoreManager
+from app.rag.core.hybrid_retriever import HybridRetriever
 from app.rag.core.chain import RAGChain
 from app.rag.core.document_registry import DocumentRegistry
 from app.rag.loaders.document_loader import DocumentLoader
@@ -40,16 +41,39 @@ class RAGSystem:
             logger.warning("跳过重建 RAG Chain：vectorstore_manager 或 llm 未初始化")
             return
 
-        retriever = self.vectorstore_manager.get_retriever(
-            search_type=self.config.search_type,
-            k=self.config.top_k,
-            score_threshold=self.config.score_threshold
-        )
+        retriever = self._build_retriever()
         self.rag_chain = RAGChain(
             llm=self.llm,
             retriever=retriever
         )
-        logger.info(f"   ✅ 检索器已刷新: search_type={self.config.search_type}, Top-K={self.config.top_k}")
+        logger.info(
+            "   ✅ 检索器已刷新: mode=%s, search_type=%s, Top-K=%s",
+            self.config.retrieval_mode,
+            self.config.search_type,
+            self.config.top_k
+        )
+
+    def _build_retriever(self, metadata_filter: Optional[Dict[str, Any]] = None):
+        """按当前配置构建检索器。"""
+        retrieval_mode = (self.config.retrieval_mode or "vector").lower()
+        if retrieval_mode == "hybrid":
+            return HybridRetriever(
+                vectorstore_manager=self.vectorstore_manager,
+                search_type=self.config.search_type,
+                k=self.config.top_k,
+                score_threshold=self.config.score_threshold,
+                keyword_k=self.config.hybrid_keyword_k,
+                metadata_filter=metadata_filter
+            )
+        if retrieval_mode != "vector":
+            logger.warning("未知检索模式: %s，回退为 vector", retrieval_mode)
+
+        return self.vectorstore_manager.get_retriever(
+            search_type=self.config.search_type,
+            k=self.config.top_k,
+            score_threshold=self.config.score_threshold,
+            metadata_filter=metadata_filter
+        )
 
     async def initialize(self):
         """初始化 RAG 系统"""
@@ -380,12 +404,7 @@ class RAGSystem:
             query_chain = self.rag_chain
             if metadata_filter:
                 # 按请求构建带 metadata 过滤条件的 retriever，避免影响全局默认链路
-                retriever = self.vectorstore_manager.get_retriever(
-                    search_type=self.config.search_type,
-                    k=self.config.top_k,
-                    score_threshold=self.config.score_threshold,
-                    metadata_filter=metadata_filter
-                )
+                retriever = self._build_retriever(metadata_filter=metadata_filter)
                 query_chain = RAGChain(
                     llm=self.llm,
                     retriever=retriever
@@ -403,12 +422,7 @@ class RAGSystem:
                 self._rebuild_rag_chain()
                 query_chain = self.rag_chain
                 if metadata_filter:
-                    retriever = self.vectorstore_manager.get_retriever(
-                        search_type=self.config.search_type,
-                        k=self.config.top_k,
-                        score_threshold=self.config.score_threshold,
-                        metadata_filter=metadata_filter
-                    )
+                    retriever = self._build_retriever(metadata_filter=metadata_filter)
                     query_chain = RAGChain(
                         llm=self.llm,
                         retriever=retriever
@@ -448,7 +462,9 @@ class RAGSystem:
             "registry": registry_stats,
             "config": {
                 "top_k": self.config.top_k,
+                "retrieval_mode": self.config.retrieval_mode,
                 "search_type": self.config.search_type,
+                "hybrid_keyword_k": self.config.hybrid_keyword_k,
                 "chunk_size": self.config.chunk_size,
                 "chunk_overlap": self.config.chunk_overlap,
                 "rebuild_on_startup": self.config.rebuild_on_startup

@@ -37,6 +37,22 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# ============ SSL 验证配置 ============
+import httpx
+import urllib3
+
+# 读取环境变量控制 SSL 验证（默认启用）
+_SSL_VERIFY = os.getenv("SSL_VERIFY", "true").lower() != "false"
+
+# 如果禁用 SSL 验证，创建自定义 httpx 客户端并抑制警告
+_http_async_client = None
+_http_client = None
+if not _SSL_VERIFY:
+    logger.warning("⚠️ SSL 证书验证已禁用（SSL_VERIFY=false）")
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    _http_async_client = httpx.AsyncClient(verify=False)
+    _http_client = httpx.Client(verify=False)
+
 # 抑制 Langfuse 内部错误的日志输出
 logging.getLogger("langfuse").setLevel(logging.ERROR)
 # ========================================
@@ -57,12 +73,16 @@ class SqliteAgentWithTools:
             raise ValueError("❌ 未配置API密钥！")
 
         # 初始化LLM
-        self.llm = ChatOpenAI(
-            model=os.getenv("MODEL_NAME", "gpt-4o-mini"),
-            temperature=0.7,
-            api_key=api_key,
-            base_url=os.getenv("OPENAI_BASE_URL")
-        )
+        llm_kwargs = {
+            "model": os.getenv("MODEL_NAME", "gpt-4o-mini"),
+            "temperature": 0.7,
+            "api_key": api_key,
+            "base_url": os.getenv("OPENAI_BASE_URL"),
+        }
+        if not _SSL_VERIFY:
+            llm_kwargs["http_async_client"] = _http_async_client
+            llm_kwargs["http_client"] = _http_client
+        self.llm = ChatOpenAI(**llm_kwargs)
 
         # ============ Langfuse 配置和初始化 ============
         self.langfuse_enabled = False
@@ -95,11 +115,14 @@ class SqliteAgentWithTools:
                         self.langfuse_host = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com")
 
                         # 初始化 Langfuse 客户端 (v2.x API)
-                        self.langfuse_client = Langfuse(
-                            public_key=public_key,
-                            secret_key=secret_key,
-                            host=self.langfuse_host,
-                        )
+                        langfuse_kwargs = {
+                            "public_key": public_key,
+                            "secret_key": secret_key,
+                            "host": self.langfuse_host,
+                        }
+                        if not _SSL_VERIFY:
+                            langfuse_kwargs["httpx_client"] = _http_client
+                        self.langfuse_client = Langfuse(**langfuse_kwargs)
                         self.langfuse_enabled = True
                         self.langfuse_sample_rate = float(os.getenv("LANGFUSE_SAMPLE_RATE", "1.0"))
 
@@ -137,12 +160,16 @@ class SqliteAgentWithTools:
         # 如果使用摘要策略，初始化摘要LLM
         self.summary_llm = None
         if self.compression_strategy == "summary":
-            self.summary_llm = ChatOpenAI(
-                model=os.getenv("SUMMARY_MODEL_NAME", "gpt-4o-mini"),
-                temperature=0.3,
-                api_key=api_key,
-                base_url=os.getenv("OPENAI_BASE_URL")
-            )
+            summary_kwargs = {
+                "model": os.getenv("SUMMARY_MODEL_NAME", "gpt-4o-mini"),
+                "temperature": 0.3,
+                "api_key": api_key,
+                "base_url": os.getenv("OPENAI_BASE_URL"),
+            }
+            if not _SSL_VERIFY:
+                summary_kwargs["http_async_client"] = _http_async_client
+                summary_kwargs["http_client"] = _http_client
+            self.summary_llm = ChatOpenAI(**summary_kwargs)
 
         # checkpointer 和 graph 将在首次使用时初始化
         self._conn = None
