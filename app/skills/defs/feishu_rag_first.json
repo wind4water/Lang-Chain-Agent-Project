@@ -1,0 +1,20 @@
+{
+  "id": "feishu_rag_first",
+  "name": "Feishu RAG First",
+  "channel": "feishu",
+  "strategy": "rag_first_then_tool_summary",
+  "description": "飞书问答优先走 RAG，再按场景补充工具，最后输出精简答案。",
+  "tool_scene_keywords": [
+    "实时",
+    "最新",
+    "天气",
+    "汇率",
+    "搜索",
+    "计算",
+    "新闻",
+    "网页"
+  ],
+  "response": {
+    "hide_sources": true
+  }
+}

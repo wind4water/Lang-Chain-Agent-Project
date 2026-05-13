@@ -16,6 +16,7 @@
 - ⭐ **流式响应**: 支持SSE流式输出，实时显示AI回复
 - ⭐ **Token统计**: 完整的Token使用统计和成本追踪（按会话、按天、按月）
 - ⭐ **Langfuse监控**: 可选的云端监控和追踪（支持完整的trace追踪）
+- ⭐ **Skill机制**: 支持按渠道加载策略（已内置飞书 RAG 优先 skill）
 
 ## 项目结构
 
@@ -31,6 +32,11 @@ LangChainProject/
 │   │   ├── __init__.py          # 工具导出
 │   │   ├── builtin.py           # 内置工具定义
 │   │   └── loader.py            # 工具加载器
+│   ├── skills/                  # ⭐ Skill 系统（渠道策略）
+│   │   ├── defs/                # 通用 skill（可提交）
+│   │   ├── sensitive/           # 敏感 skill（默认忽略）
+│   │   ├── loader.py            # skill 加载器
+│   │   └── README.md            # skill 目录规范
 │   └── main.py                  # FastAPI HTTP服务入口
 │
 ├── tests/                       # 测试目录
@@ -111,6 +117,8 @@ MODEL_NAME=gpt-4o-mini
 # true: Agent 可以自动调用工具（推荐）
 # false: 纯对话模式，不调用工具
 ENABLE_TOOLS=true
+# 工具调用阶段模型温度（推荐低温，减少工具参数漂移）
+TOOL_CALL_TEMPERATURE=0.1
 
 # ========================================
 # 上下文压缩策略（可选）
@@ -132,6 +140,12 @@ RAG_CHROMA_PATH=data/chroma
 RAG_REBUILD_ON_STARTUP=false  # 仅首次启动或文档变更时设为 true
 
 # ========================================
+# 飞书 Skill 配置（可选）⭐
+# ========================================
+# 飞书渠道启用的 skill ID（对应 app/skills/defs/<id>.json）
+FEISHU_SKILL_ID=feishu_rag_first
+
+# ========================================
 # Langfuse 监控配置（可选）
 # ========================================
 # 是否启用 Langfuse 追踪和监控
@@ -149,6 +163,56 @@ LANGFUSE_SAMPLE_RATE=1.0  # 采样率 0.0-1.0
 > 💡 **上下文压缩**：长对话会导致token超限和成本暴涨。推荐使用 `sliding_window` 策略。详见 [docs/guides/compression.md](docs/guides/compression.md)
 >
 > 💡 **Langfuse 监控**：可选的云端监控和完整trace追踪。需要注册 [Langfuse](https://cloud.langfuse.com) 获取密钥。详见 [docs/troubleshooting/langfuse-issues.md](docs/troubleshooting/langfuse-issues.md)
+
+## Skill 功能与配置
+
+### 能力说明
+
+- 支持按渠道定义对话策略（当前主要用于飞书）
+- 当前默认 skill：`feishu_rag_first`
+  - 先做 RAG 检索
+  - 再按场景决定是否补充工具
+  - 最后模型总结答案
+  - 对外回复仅输出答案，不输出来源
+
+### 目录与文件约定
+
+- 通用 skill（可提交）：`app/skills/defs/*.json`
+- 敏感 skill（自动忽略）：
+  - `app/skills/sensitive/`
+  - `app/skills/**/*.sensitive.json`
+- 模板文件：`app/skills/defs/skill_template.json`
+
+### 关键配置项
+
+- `FEISHU_SKILL_ID`
+  - 说明：飞书渠道当前生效的 skill
+  - 示例：`FEISHU_SKILL_ID=feishu_rag_first`
+- `TOOL_CALL_TEMPERATURE`
+  - 说明：工具调用阶段模型温度，建议低值减少参数改写漂移
+  - 推荐：`0.0 ~ 0.2`（默认 `0.1`）
+
+### 操作流程
+
+1. 在 `app/skills/defs/` 新增或复制一个 skill JSON（可参考 `skill_template.json`）
+2. 在 `.env` 设置 `FEISHU_SKILL_ID=<你的skill_id>`
+3. 重启服务使配置生效
+4. 在飞书发起问题验证策略是否符合预期
+5. 如需重置当前群上下文，在飞书发送 `/clear` 或 `/reset`
+
+### 常见场景建议
+
+- 内部知识问答：优先 RAG，禁用或弱化外部搜索
+- 实时信息问题（天气/汇率/新闻）：允许工具补充
+- 高稳定性场景：降低 `TOOL_CALL_TEMPERATURE`，减少工具参数漂移
+
+### 上线前检查清单
+
+- 确认 `FEISHU_SKILL_ID` 指向正确 skill，且对应 JSON 文件存在
+- 确认 `RAG_ENABLED=true` 且知识库已完成同步（必要时执行一次 `POST /rag/sync`）
+- 抽样验证 3 类问题：内部知识、实时信息、普通闲聊
+- 在飞书群测试 `/clear` 或 `/reset`，确认上下文可被重置
+- 检查 Langfuse（如启用）是否能看到完整链路与关键元数据
 
 ### 3. 启动服务
 

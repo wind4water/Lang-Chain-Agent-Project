@@ -1,0 +1,18 @@
+{
+  "id": "your_skill_id",
+  "name": "Your Skill Name",
+  "channel": "feishu",
+  "strategy": "rag_first_then_tool_summary",
+  "description": "描述这个 skill 的目标和适用范围。",
+  "tool_scene_keywords": [
+    "实时",
+    "最新",
+    "天气",
+    "汇率",
+    "搜索",
+    "新闻"
+  ],
+  "response": {
+    "hide_sources": true
+  }
+}
