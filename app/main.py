@@ -1,5 +1,6 @@
 # 确保工作目录是项目根目录（支持 python app/main.py 和 uvicorn 两种启动方式）
 import os
+import asyncio
 import sys
 
 # 获取项目根目录（main.py 所在目录的上级）
@@ -81,6 +82,7 @@ async def lifespan(app: FastAPI):
             config=_feishu_config,
             client=_feishu_client,
             get_agent=_get_agent,
+            main_loop=asyncio.get_running_loop(),
         )
         _feishu_handler.start()
     else:

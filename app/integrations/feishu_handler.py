@@ -7,7 +7,7 @@ import asyncio
 import os
 import ssl
 import time
-from typing import Optional, Callable, Awaitable
+from typing import Optional, Callable
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
@@ -93,10 +93,12 @@ class FeishuHandler:
         config: FeishuConfig,
         client: FeishuClient,
         get_agent: Callable[[], Optional[object]],
+        main_loop: asyncio.AbstractEventLoop,
     ):
         self.config = config
         self.client = client
         self.get_agent = get_agent
+        self.main_loop = main_loop
         self._ws_client: Optional[lark.ws.Client] = None
         self._running = False
 
@@ -107,7 +109,13 @@ class FeishuHandler:
         """飞书 SDK 同步回调 - 调度到异步任务"""
         global _last_event_time
         _last_event_time = time.time()
-        asyncio.ensure_future(self._handle_message_async(data))
+        # 回调可能来自后台线程；统一投递到 FastAPI 主事件循环执行，
+        # 避免 Agent/Sqlite checkpointer 绑定到不同 loop。
+        if self.main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._handle_message_async(data),
+                self.main_loop
+            )
 
     # ------------------------------------------------------------------
     # 异步消息处理
