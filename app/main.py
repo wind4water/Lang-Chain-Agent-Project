@@ -27,12 +27,20 @@ from contextlib import asynccontextmanager
 from app.agents.sqlite_with_tools import SqliteAgentWithTools
 from app.rag import rag_system  # RAG 系统
 from app.token_usage import request_token_scope, get_request_token_usage
+from app.integrations.feishu_config import FeishuConfig
+from app.integrations.feishu_client import FeishuClient
+from app.integrations.feishu_handler import FeishuHandler
 import uvicorn
 import os
 import json
 
 # 全局Agent实例
 agent = None
+
+# 飞书相关实例
+_feishu_config: FeishuConfig | None = None
+_feishu_client: FeishuClient | None = None
+_feishu_handler: FeishuHandler | None = None
 
 
 def _get_agent():
@@ -64,8 +72,27 @@ async def lifespan(app: FastAPI):
         print(f"⚠️ RAG 系统初始化失败: {e}")
         print("   对话功能不受影响，RAG 功能不可用")
 
+    # 启动飞书长连接（可选）
+    global _feishu_config, _feishu_client, _feishu_handler
+    _feishu_config = FeishuConfig()
+    if _feishu_config.is_configured():
+        _feishu_client = FeishuClient(_feishu_config)
+        _feishu_handler = FeishuHandler(
+            config=_feishu_config,
+            client=_feishu_client,
+            get_agent=_get_agent,
+        )
+        _feishu_handler.start()
+    else:
+        if _feishu_config.enabled:
+            print("⚠️ 飞书已启用但配置不完整，请检查 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
+        else:
+            print("ℹ️ 飞书机器人未启用")
+
     yield
-    # 关闭时清理（如果需要）
+    # 关闭时清理
+    if _feishu_handler:
+        _feishu_handler.stop()
     print("🔄 Shutting down...")
 
 
@@ -111,6 +138,7 @@ async def root():
                 "Multi-Session - 多会话管理",
                 "Token Statistics - Token使用统计和成本追踪",
                 "RAG - 检索增强生成（知识库问答）",
+                "Feishu Bot - 飞书机器人 WebSocket 长连接",
             ],
             "endpoints": {
                 "POST /chat": "发送消息进行对话",
@@ -129,6 +157,7 @@ async def root():
                 "POST /rag/rebuild": "重建知识库（全量）",
                 "POST /rag/sync": "智能同步知识库（增量更新）⭐推荐",
                 "GET /rag/stats": "RAG 系统统计信息",
+                "GET /feishu/health": "飞书机器人健康状态",
             }
         })
 
@@ -224,6 +253,19 @@ async def clear_history(session_id: str):
             return _with_request_tokens({"message": f"会话 {session_id} 的历史记录已清除"})
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"清除历史记录时出错: {str(e)}")
+
+
+@app.get("/feishu/health")
+async def feishu_health():
+    """飞书机器人健康状态"""
+    async with request_token_scope():
+        config = FeishuConfig()
+        return _with_request_tokens({
+            "enabled": config.enabled,
+            "configured": config.is_configured(),
+            "app_id_prefix": config.app_id[:8] + "..." if config.app_id else None,
+            "handler_running": _feishu_handler._running if _feishu_handler else False,
+        })
 
 
 @app.get("/health")
