@@ -10,6 +10,7 @@ from app.rag.config import rag_config
 from app.rag.core.embeddings import EmbeddingManager
 from app.rag.core.vectorstore import VectorStoreManager
 from app.rag.core.hybrid_retriever import HybridRetriever
+from app.rag.core.es_keyword_retriever import ESKeywordRetriever
 from app.rag.core.chain import RAGChain
 from app.rag.core.document_registry import DocumentRegistry
 from app.rag.loaders.document_loader import DocumentLoader
@@ -30,6 +31,7 @@ class RAGSystem:
         self.rag_chain: Optional[RAGChain] = None
         self.llm: Optional[ChatOpenAI] = None
         self.document_registry: Optional[DocumentRegistry] = None
+        self.es_keyword_retriever: Optional[ESKeywordRetriever] = None
 
         self._initialized = False
 
@@ -63,7 +65,8 @@ class RAGSystem:
                 k=self.config.top_k,
                 score_threshold=self.config.score_threshold,
                 keyword_k=self.config.hybrid_keyword_k,
-                metadata_filter=metadata_filter
+                metadata_filter=metadata_filter,
+                es_keyword_retriever=self.es_keyword_retriever
             )
         if retrieval_mode != "vector":
             logger.warning("未知检索模式: %s，回退为 vector", retrieval_mode)
@@ -114,6 +117,24 @@ class RAGSystem:
                 chunk_overlap=self.config.chunk_overlap
             )
             logger.info(f"   ✅ 块大小: {self.config.chunk_size}, 重叠: {self.config.chunk_overlap}")
+
+            # 3.5 初始化 ES 关键词召回（可选）
+            if self.config.es_enabled or self.config.keyword_backend.lower() == "es":
+                logger.info("3️⃣.5️⃣  初始化 ES 关键词召回...")
+                hosts = [h.strip() for h in self.config.es_hosts.split(",") if h.strip()]
+                self.es_keyword_retriever = ESKeywordRetriever(
+                    hosts=hosts,
+                    index_name=self.config.es_index_name,
+                    username=self.config.es_username,
+                    password=self.config.es_password,
+                    verify_certs=self.config.es_verify_certs,
+                    ca_certs=self.config.es_ca_certs,
+                    request_timeout=self.config.es_request_timeout,
+                )
+                if self.es_keyword_retriever.available:
+                    logger.info("   ✅ ES 关键词召回已启用: %s", self.config.es_index_name)
+                else:
+                    logger.warning("   ⚠️ ES 不可用，将回退到本地关键词召回")
 
             # 4. 初始化文档注册表
             logger.info("4️⃣  初始化文档注册表...")
@@ -215,6 +236,8 @@ class RAGSystem:
                 logger.info(f"❌ 删除: {file_path}")
                 indexed_source = os.path.normpath(os.path.join(documents_path, file_path))
                 self.vectorstore_manager.delete_by_source(indexed_source)
+                if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
+                    self.es_keyword_retriever.delete_by_source(indexed_source)
                 self.document_registry.unregister_document(file_path)
 
             # 3. 处理新增和修改的文档
@@ -255,9 +278,13 @@ class RAGSystem:
                         if rel_source in modified_files:
                             logger.info(f"🔄 更新: {rel_source}")
                             self.vectorstore_manager.update_documents(docs, indexed_source)
+                            if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
+                                self.es_keyword_retriever.update_documents(docs, indexed_source)
                         else:
                             logger.info(f"➕ 新增: {rel_source}")
                             self.vectorstore_manager.add_documents(docs)
+                            if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
+                                self.es_keyword_retriever.index_documents(docs)
 
                         # 更新注册表
                         metadata = self.document_registry.get_file_metadata(
@@ -334,6 +361,12 @@ class RAGSystem:
             logger.info("🔄 重建向量存储...")
             ids = self.vectorstore_manager.rebuild(split_docs)
             logger.info(f"   ✅ 成功索引 {len(ids)} 个文本块")
+
+            # 3.5 重建 ES 关键词索引（可选）
+            if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
+                logger.info("🔄 重建 ES 关键词索引...")
+                es_count = self.es_keyword_retriever.rebuild(split_docs)
+                logger.info(f"   ✅ ES 成功索引 {es_count} 个文本块")
 
             # 4. 重建文档注册表
             logger.info("📝 重建文档注册表...")
@@ -463,11 +496,15 @@ class RAGSystem:
             "config": {
                 "top_k": self.config.top_k,
                 "retrieval_mode": self.config.retrieval_mode,
+                "keyword_backend": self.config.keyword_backend,
                 "search_type": self.config.search_type,
                 "hybrid_keyword_k": self.config.hybrid_keyword_k,
                 "chunk_size": self.config.chunk_size,
                 "chunk_overlap": self.config.chunk_overlap,
-                "rebuild_on_startup": self.config.rebuild_on_startup
+                "rebuild_on_startup": self.config.rebuild_on_startup,
+                "es_enabled": self.config.es_enabled,
+                "es_index_name": self.config.es_index_name,
+                "es_available": bool(self.es_keyword_retriever and self.es_keyword_retriever.available),
             }
         }
 

@@ -664,6 +664,8 @@ POST /chat
 ### 开发指南
 - [踩坑记录](docs/troubleshooting/pitfalls.md) - SQLite持久化开发中的7个大坑
 - [快速参考](docs/troubleshooting/quick-reference.md) - 常见错误和解决方案
+- [阿里云部署与安全加固](docs/guides/aliyun-deployment-security.md) - 域名访问、生产部署与防攻击清单
+- [2核2G测试部署清单](docs/guides/2c2g-test-deployment-checklist.md) - 低配服务器联调与调试建议
 
 ## 🧪 测试脚本
 

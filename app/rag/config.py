@@ -52,6 +52,10 @@ class RAGConfig(BaseModel):
         default_factory=lambda: os.getenv("RAG_RETRIEVAL_MODE", "vector"),
         description="检索模式: vector, hybrid"
     )
+    keyword_backend: str = Field(
+        default_factory=lambda: os.getenv("RAG_KEYWORD_BACKEND", "local"),
+        description="关键词召回后端: local, es"
+    )
     score_threshold: float = Field(
         default_factory=lambda: float(os.getenv("RAG_SCORE_THRESHOLD", "0.5")),
         description="相似度阈值"
@@ -59,6 +63,40 @@ class RAGConfig(BaseModel):
     hybrid_keyword_k: int = Field(
         default_factory=lambda: int(os.getenv("RAG_HYBRID_KEYWORD_K", "8")),
         description="Hybrid 模式下关键词召回候选数量"
+    )
+
+    # Elasticsearch 关键词召回配置
+    es_enabled: bool = Field(
+        default_factory=lambda: os.getenv("ES_ENABLED", "false").lower() == "true",
+        description="是否启用 Elasticsearch 关键词召回"
+    )
+    es_hosts: str = Field(
+        default_factory=lambda: os.getenv("ES_HOSTS", "http://127.0.0.1:9200"),
+        description="ES 地址，多个地址用逗号分隔"
+    )
+    es_index_name: str = Field(
+        default_factory=lambda: os.getenv("ES_INDEX_NAME", "rag_keyword_chunks"),
+        description="ES 索引名称"
+    )
+    es_username: Optional[str] = Field(
+        default_factory=lambda: os.getenv("ES_USERNAME"),
+        description="ES 用户名（可选）"
+    )
+    es_password: Optional[str] = Field(
+        default_factory=lambda: os.getenv("ES_PASSWORD"),
+        description="ES 密码（可选）"
+    )
+    es_verify_certs: bool = Field(
+        default_factory=lambda: os.getenv("ES_VERIFY_CERTS", "true").lower() == "true",
+        description="ES HTTPS 证书校验"
+    )
+    es_ca_certs: Optional[str] = Field(
+        default_factory=lambda: os.getenv("ES_CA_CERTS"),
+        description="ES CA 证书路径（可选）"
+    )
+    es_request_timeout: int = Field(
+        default_factory=lambda: int(os.getenv("ES_REQUEST_TIMEOUT", "30")),
+        description="ES 请求超时时间（秒）"
     )
 
     # 文本分割配置

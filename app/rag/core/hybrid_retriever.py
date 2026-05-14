@@ -25,6 +25,7 @@ class HybridRetriever(BaseRetriever):
     score_threshold: float = 0.5
     keyword_k: int = 8
     metadata_filter: Optional[Dict[str, Any]] = None
+    es_keyword_retriever: Optional[Any] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -46,7 +47,7 @@ class HybridRetriever(BaseRetriever):
         preview = doc.page_content[:80] if doc.page_content else ""
         return f"{source}|{filename}|{start_index}|{preview}"
 
-    def _keyword_search(self, query: str) -> List[Document]:
+    def _keyword_search_local(self, query: str) -> List[Document]:
         """基于词项重叠的关键词召回。"""
         query_tokens = self._tokenize(query)
         if not query_tokens:
@@ -83,6 +84,18 @@ class HybridRetriever(BaseRetriever):
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [doc for _, doc in scored[: self.keyword_k]]
+
+    def _keyword_search(self, query: str) -> List[Document]:
+        """关键词召回：优先 ES，失败时回退本地词项重叠。"""
+        if self.es_keyword_retriever is not None and getattr(self.es_keyword_retriever, "available", False):
+            docs = self.es_keyword_retriever.search(
+                query=query,
+                k=self.keyword_k,
+                metadata_filter=self.metadata_filter
+            )
+            if docs:
+                return docs
+        return self._keyword_search_local(query)
 
     def _vector_search(self, query: str) -> List[Document]:
         """向量检索。"""

@@ -27,7 +27,8 @@ class EmbeddingManager:
         self,
         model_name: str = "text-embedding-3-small",
         api_key: Optional[str] = None,
-        base_url: Optional[str] = None
+        base_url: Optional[str] = None,
+        chunk_size: Optional[int] = None
     ):
         """
         初始化嵌入模型管理器
@@ -40,6 +41,8 @@ class EmbeddingManager:
         self.model_name = model_name
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
+        # 某些兼容 OpenAI 的服务端限制单次 input 数组长度（如 <= 64）
+        self.chunk_size = chunk_size or int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
 
         if not self.api_key:
             raise ValueError("❌ OPENAI_API_KEY 未配置")
@@ -55,6 +58,7 @@ class EmbeddingManager:
                 "model": self.model_name,
                 "api_key": self.api_key,
                 "base_url": self.base_url,
+                "chunk_size": self.chunk_size,
             }
             if not _SSL_VERIFY:
                 emb_kwargs["http_client"] = _http_client
