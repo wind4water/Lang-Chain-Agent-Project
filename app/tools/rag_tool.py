@@ -133,7 +133,8 @@ class RAGSearchTool(BaseTool):
 
             effective_query = self._pick_effective_query(query=query, original_query=original_query)
             logger.info(
-                "🔍 RAG 工具被调用: query=%s, effective_query=%s, original_query=%s, metadata_filter=%s",
+                "🔧 ToolStart: name=%s, query=%s, effective_query=%s, original_query=%s, metadata_filter=%s",
+                self.name,
                 query,
                 effective_query,
                 original_query,
@@ -168,10 +169,16 @@ class RAGSearchTool(BaseTool):
                 if source_count > 3:
                     response += f"\n   ... 还有 {source_count - 3} 个来源"
 
-            logger.info(f"✅ RAG 工具返回成功，来源数: {source_count}")
+            logger.info(
+                "🔧 ToolEnd: name=%s, source_count=%s, answer_preview=%s, output_preview=%s",
+                self.name,
+                source_count,
+                (answer[:120] + "...") if len(answer) > 120 else answer,
+                (response[:200] + "...") if len(response) > 200 else response,
+            )
             return response
 
         except Exception as e:
             error_msg = f"知识库搜索出错: {str(e)}"
-            logger.error(f"❌ RAG 工具执行失败: {e}")
+            logger.error("🔧 ToolError: name=%s, error=%s", self.name, e)
             return f"❌ {error_msg}"

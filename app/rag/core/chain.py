@@ -56,6 +56,36 @@ class RAGChain:
 
         logger.info("✅ RAG Chain 初始化完成")
 
+    def _record_usage(self, question: str, answer: str):
+        """统一记录 token 使用（当前为近似统计）。"""
+        record_llm_token_usage(
+            prompt_tokens=len(question) // 3,
+            completion_tokens=len(answer) // 3,
+            model_name=getattr(self.llm, "model_name", "")
+        )
+
+    def _build_messages(self, question: str, docs: List[Document]) -> list:
+        """基于问题与已检索文档构造提示消息。"""
+        prompt = ChatPromptTemplate.from_template(self.prompt_template)
+        context = self._format_docs(docs)
+        return prompt.format_messages(context=context, question=question)
+
+    def _invoke_from_docs(self, question: str, docs: List[Document]) -> str:
+        """同步：复用已检索 docs 直接生成答案（不再二次检索）。"""
+        messages = self._build_messages(question, docs)
+        response = self.llm.invoke(messages)
+        answer = StrOutputParser().invoke(response)
+        self._record_usage(question, answer)
+        return answer
+
+    async def _ainvoke_from_docs(self, question: str, docs: List[Document]) -> str:
+        """异步：复用已检索 docs 直接生成答案（不再二次检索）。"""
+        messages = self._build_messages(question, docs)
+        response = await self.llm.ainvoke(messages)
+        answer = StrOutputParser().invoke(response)
+        self._record_usage(question, answer)
+        return answer
+
     def _build_chain(self):
         """构建 RAG Chain"""
         # 创建 Prompt
@@ -118,11 +148,7 @@ class RAGChain:
         try:
             answer = self.chain.invoke(question)
             # 当前实现通过 StrOutputParser 丢失了原始 usage，使用近似值统计请求级 token
-            record_llm_token_usage(
-                prompt_tokens=len(question) // 3,
-                completion_tokens=len(answer) // 3,
-                model_name=getattr(self.llm, "model_name", "")
-            )
+            self._record_usage(question, answer)
             logger.info("✅ RAG 回答生成成功")
             return answer
 
@@ -145,11 +171,7 @@ class RAGChain:
         try:
             answer = await self.chain.ainvoke(question)
             # 当前实现通过 StrOutputParser 丢失了原始 usage，使用近似值统计请求级 token
-            record_llm_token_usage(
-                prompt_tokens=len(question) // 3,
-                completion_tokens=len(answer) // 3,
-                model_name=getattr(self.llm, "model_name", "")
-            )
+            self._record_usage(question, answer)
             logger.info("✅ RAG 回答生成成功")
             return answer
 
@@ -172,9 +194,10 @@ class RAGChain:
         try:
             # 先检索相关文档
             docs = self.retriever.get_relevant_documents(question)
+            logger.info("RAG 来源检索完成（同步）: docs=%s", len(docs))
 
-            # 生成答案
-            answer = self.invoke(question)
+            # 基于同一批 docs 生成答案，避免二次检索
+            answer = self._invoke_from_docs(question, docs)
 
             # 提取来源信息
             sources = []
@@ -211,11 +234,15 @@ class RAGChain:
         logger.info(f"RAG 异步查询（含来源）: {question}")
 
         try:
-            # 先检索相关文档（使用同步方法，因为retriever可能不支持异步）
-            docs = self.retriever.invoke(question)
+            # 先检索相关文档（优先使用异步检索，不可用时回退同步）
+            if hasattr(self.retriever, "ainvoke"):
+                docs = await self.retriever.ainvoke(question)
+            else:
+                docs = self.retriever.invoke(question)
+            logger.info("RAG 来源检索完成（异步）: docs=%s", len(docs))
 
-            # 生成答案
-            answer = await self.ainvoke(question)
+            # 基于同一批 docs 生成答案，避免二次检索
+            answer = await self._ainvoke_from_docs(question, docs)
 
             # 提取来源信息
             sources = []

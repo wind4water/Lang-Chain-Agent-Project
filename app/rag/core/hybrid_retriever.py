@@ -28,6 +28,8 @@ class HybridRetriever(BaseRetriever):
     es_keyword_retriever: Optional[Any] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    VECTOR_WEIGHT: float = 2.0
+    KEYWORD_WEIGHT: float = 1.0
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
@@ -47,10 +49,18 @@ class HybridRetriever(BaseRetriever):
         preview = doc.page_content[:80] if doc.page_content else ""
         return f"{source}|{filename}|{start_index}|{preview}"
 
+    @staticmethod
+    def _doc_brief(doc: Document) -> str:
+        metadata = doc.metadata or {}
+        filename = metadata.get("filename") or metadata.get("source") or "unknown"
+        start_index = metadata.get("start_index", "")
+        return f"{filename}@{start_index}"
+
     def _keyword_search_local(self, query: str) -> List[Document]:
         """基于词项重叠的关键词召回。"""
         query_tokens = self._tokenize(query)
         if not query_tokens:
+            logger.info("Hybrid 本地关键词召回: query 为空或无有效 token")
             return []
 
         query_counter = Counter(query_tokens)
@@ -64,6 +74,7 @@ class HybridRetriever(BaseRetriever):
         docs = results.get("documents", []) or []
         metas = results.get("metadatas", []) or []
         if not docs:
+            logger.info("Hybrid 本地关键词召回: 候选集为空")
             return []
 
         scored: List[tuple[float, Document]] = []
@@ -83,31 +94,54 @@ class HybridRetriever(BaseRetriever):
             scored.append((score, Document(page_content=content, metadata=metadata)))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [doc for _, doc in scored[: self.keyword_k]]
+        top_docs = [doc for _, doc in scored[: self.keyword_k]]
+        logger.info(
+            "Hybrid 本地关键词召回完成: query=%s, candidates=%s, matched=%s, top_k=%s",
+            query,
+            len(docs),
+            len(scored),
+            len(top_docs),
+        )
+        return top_docs
 
     def _keyword_search(self, query: str) -> List[Document]:
         """关键词召回：优先 ES，失败时回退本地词项重叠。"""
         if self.es_keyword_retriever is not None and getattr(self.es_keyword_retriever, "available", False):
+            logger.info("Hybrid 关键词召回后端: ES")
             docs = self.es_keyword_retriever.search(
                 query=query,
                 k=self.keyword_k,
                 metadata_filter=self.metadata_filter
             )
             if docs:
+                logger.info("Hybrid ES 关键词召回命中: %s", len(docs))
                 return docs
+            logger.info("Hybrid ES 关键词召回为空，回退本地关键词召回")
+        else:
+            logger.info("Hybrid 关键词召回后端: local（ES 不可用）")
         return self._keyword_search_local(query)
 
     def _vector_search(self, query: str) -> List[Document]:
         """向量检索。"""
+        logger.info(
+            "Hybrid 向量检索开始: search_type=%s, k=%s, score_threshold=%s, metadata_filter=%s",
+            self.search_type,
+            self.k,
+            self.score_threshold,
+            self.metadata_filter,
+        )
         retriever = self.vectorstore_manager.get_retriever(
             search_type=self.search_type,
             k=self.k,
             score_threshold=self.score_threshold,
             metadata_filter=self.metadata_filter,
         )
-        return retriever.invoke(query)
+        docs = retriever.invoke(query)
+        logger.info("Hybrid 向量检索完成: query=%s, hits=%s", query, len(docs))
+        return docs
 
     def _hybrid_search(self, query: str) -> List[Document]:
+        logger.info("Hybrid 融合检索开始: query=%s", query)
         vector_docs = self._vector_search(query)
         keyword_docs = self._keyword_search(query)
 
@@ -118,21 +152,32 @@ class HybridRetriever(BaseRetriever):
         for i, doc in enumerate(vector_docs):
             key = self._doc_key(doc)
             doc_map[key] = doc
-            score_map[key] = score_map.get(key, 0.0) + (2.0 * (len(vector_docs) - i))
+            score_map[key] = score_map.get(key, 0.0) + (
+                self.VECTOR_WEIGHT * (len(vector_docs) - i)
+            )
 
         for i, doc in enumerate(keyword_docs):
             key = self._doc_key(doc)
             doc_map[key] = doc
-            score_map[key] = score_map.get(key, 0.0) + float(len(keyword_docs) - i)
+            score_map[key] = score_map.get(key, 0.0) + (
+                self.KEYWORD_WEIGHT * float(len(keyword_docs) - i)
+            )
 
         ranked_keys = sorted(score_map.keys(), key=lambda k: score_map[k], reverse=True)
         merged_docs = [doc_map[k] for k in ranked_keys[: self.k]]
+        top_scores = [round(score_map[k], 3) for k in ranked_keys[: self.k]]
+        top_docs_brief = [self._doc_brief(doc_map[k]) for k in ranked_keys[: self.k]]
 
         logger.info(
-            "Hybrid 检索完成: vector=%s, keyword=%s, merged=%s",
+            "Hybrid 融合检索完成: vector_hits=%s, keyword_hits=%s, merged_hits=%s, "
+            "vector_weight=%.2f, keyword_weight=%.2f, top_docs=%s, top_scores=%s",
             len(vector_docs),
             len(keyword_docs),
             len(merged_docs),
+            self.VECTOR_WEIGHT,
+            self.KEYWORD_WEIGHT,
+            top_docs_brief,
+            top_scores,
         )
         return merged_docs
 

@@ -226,10 +226,22 @@ class ESKeywordRetriever:
     ) -> List[Document]:
         """执行 ES 关键词召回。"""
         if not self.available or not query.strip():
+            logger.info(
+                "ES 关键词召回跳过: available=%s, has_query=%s",
+                self.available,
+                bool(query and query.strip()),
+            )
             return []
         assert self._client is not None
 
         filter_clauses = self._build_filter_clauses(metadata_filter)
+        logger.info(
+            "ES 关键词召回开始: index=%s, query=%s, k=%s, filter=%s",
+            self.index_name,
+            query,
+            k,
+            metadata_filter,
+        )
         body: Dict[str, Any] = {
             "size": k,
             "query": {
@@ -266,6 +278,12 @@ class ESKeywordRetriever:
                     page_content=source.get("content", ""),
                     metadata=metadata
                 ))
+            top_scores = [round(float(hit.get("_score", 0.0)), 4) for hit in hits[:3]]
+            logger.info(
+                "ES 关键词召回完成: hits=%s, top_scores=%s",
+                len(docs),
+                top_scores,
+            )
             return docs
         except Exception as e:
             logger.warning("ES 关键词召回失败: %s", e)

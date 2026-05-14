@@ -268,21 +268,8 @@ class FeishuHandler:
         if self._active_skill and self._active_skill.style_instruction:
             query_text = f"{self._active_skill.style_instruction}\n\n用户问题: {text}"
 
-        # 流式调用 Agent
-        if self._active_skill and self._active_skill.strategy == "rag_first_then_tool_summary":
-            try:
-                skill_answer = await self._run_rag_first_skill(
-                    agent=agent,
-                    user_text=query_text,
-                    session_id=session_id,
-                    skill=self._active_skill,
-                )
-                await self.client.update_card(card_msg_id, skill_answer or "（无回复内容）")
-                return
-            except Exception as e:
-                print(f"[feishu] skill 执行失败，回退默认链路: {e}", flush=True)
-
-        # 默认流式输出流程
+        # 统一走默认流式输出流程（与 /chat/stream 保持一致）
+        # skill 仅保留 query_text 风格注入，不再走 rag_first 特殊分支。
         await self._stream_response(agent, query_text, session_id, card_msg_id)
 
     @staticmethod

@@ -84,6 +84,7 @@ class ToolEventCollectorCallback(BaseCallbackHandler):
         self.max_events = max_events
         self.max_text_length = max_text_length
         self.events: list[dict[str, Any]] = []
+        self._tool_name_stack: list[str] = []
 
     def _clip(self, value: Any) -> str:
         text = str(value)
@@ -98,6 +99,7 @@ class ToolEventCollectorCallback(BaseCallbackHandler):
 
     def on_tool_start(self, serialized: dict, input_str: str, **kwargs: Any) -> Any:
         tool_name = (serialized or {}).get("name") or kwargs.get("name") or "unknown_tool"
+        self._tool_name_stack.append(tool_name)
         self._append_event({
             "phase": "start",
             "tool_name": tool_name,
@@ -105,14 +107,18 @@ class ToolEventCollectorCallback(BaseCallbackHandler):
         })
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> Any:
+        tool_name = kwargs.get("name") or (self._tool_name_stack.pop() if self._tool_name_stack else "unknown_tool")
         self._append_event({
             "phase": "end",
+            "tool_name": tool_name,
             "output_preview": self._clip(output),
         })
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> Any:
+        tool_name = kwargs.get("name") or (self._tool_name_stack.pop() if self._tool_name_stack else "unknown_tool")
         self._append_event({
             "phase": "error",
+            "tool_name": tool_name,
             "error": self._clip(error),
         })
 
@@ -244,6 +250,29 @@ class SqliteAgentWithTools:
         print(f"✅ 上下文压缩策略: {self.compression_strategy}")
         print(f"✅ 工具调用: {'启用' if enable_tools else '禁用'}")
         print(f"✅ 工具调用温度: {self.tool_call_temperature}")
+
+    def _log_tool_trace_summary(self, session_id: str, tool_events: list[dict[str, Any]]) -> None:
+        """打印单次请求工具调用摘要，便于定位 tool 链路。"""
+        if not tool_events:
+            logger.info("🧰 ToolTrace: session_id=%s, events=0（本轮未触发工具）", session_id)
+            return
+
+        logger.info("🧰 ToolTrace: session_id=%s, events=%s", session_id, len(tool_events))
+        for idx, event in enumerate(tool_events, 1):
+            phase = event.get("phase", "unknown")
+            tool_name = event.get("tool_name", "unknown_tool")
+            input_preview = event.get("input_preview")
+            output_preview = event.get("output_preview")
+            error = event.get("error")
+            logger.info(
+                "🧰 ToolTrace[%s]: phase=%s, tool=%s, input=%s, output=%s, error=%s",
+                idx,
+                phase,
+                tool_name,
+                input_preview,
+                output_preview,
+                error,
+            )
 
     def _create_run_callbacks(self, session_id: str, user_message: str, stream: bool):
         """构建本次请求 callbacks（Langfuse 自动链路 + tool 事件采集）。"""
@@ -513,6 +542,7 @@ class SqliteAgentWithTools:
 
         elapsed = time.time() - start_time
         logger.info("📥 LangGraph 调用完成: elapsed=%.2fs", elapsed)
+        self._log_tool_trace_summary(session_id=session_id, tool_events=tool_collector.events)
 
         # 尝试从结果中提取Token使用信息（累计多次模型调用）
         prompt_tokens = 0
@@ -612,8 +642,30 @@ class SqliteAgentWithTools:
     async def clear_history(self, session_id: str):
         """清除会话历史"""
         await self._ensure_initialized()
-        config = {"configurable": {"thread_id": session_id}}
-        await self.graph.aupdate_state(config, {"messages": []})
+        async with aiosqlite.connect(self.db_path) as conn:
+            cursor = await conn.cursor()
+
+            # 硬删除该会话的 checkpoint 数据，避免 add_messages reducer 导致“空更新无效”
+            await cursor.execute(
+                "DELETE FROM checkpoint_writes WHERE thread_id = ?",
+                (session_id,)
+            )
+            writes_deleted = cursor.rowcount or 0
+
+            await cursor.execute(
+                "DELETE FROM checkpoints WHERE thread_id = ?",
+                (session_id,)
+            )
+            checkpoints_deleted = cursor.rowcount or 0
+
+            await conn.commit()
+
+        logger.info(
+            "🧹 会话上下文已硬清空: session_id=%s, checkpoints_deleted=%s, checkpoint_writes_deleted=%s",
+            session_id,
+            checkpoints_deleted,
+            writes_deleted,
+        )
 
     async def list_all_sessions(self):
         """列出所有session_id"""
@@ -1079,6 +1131,7 @@ class SqliteAgentWithTools:
                 except Exception as e:
                     logger.warning(f"Langfuse generation 结束失败: {e}")
             # ============================================
+            self._log_tool_trace_summary(session_id=session_id, tool_events=tool_collector.events)
 
         except Exception as e:
             # 流式输出过程中的错误
@@ -1092,5 +1145,6 @@ class SqliteAgentWithTools:
                 except Exception:
                     pass
             # ===============================================
+            self._log_tool_trace_summary(session_id=session_id, tool_events=tool_collector.events)
 
 
