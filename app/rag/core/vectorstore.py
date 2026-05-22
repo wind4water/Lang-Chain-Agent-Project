@@ -5,6 +5,7 @@ from typing import Optional, List
 from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
+from chromadb.config import Settings
 import os
 import shutil
 import logging
@@ -63,7 +64,8 @@ class VectorStoreManager:
         return Chroma(
             collection_name=self.collection_name,
             embedding_function=self.embeddings,
-            persist_directory=self.persist_directory
+            persist_directory=self.persist_directory,
+            client_settings=Settings(anonymized_telemetry=False),
         )
 
     @property
@@ -89,7 +91,16 @@ class VectorStoreManager:
             return []
 
         logger.info(f"添加 {len(documents)} 个文档到向量存储")
-        ids = self.vectorstore.add_documents(documents)
+        
+        # 为了防止 ChromaDB 单次批量写入超过限制（5461 条），进行分批（batch_size=2000）写入
+        batch_size = 2000
+        ids = []
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i + batch_size]
+            logger.info(f"👉 正在写入分批 {i//batch_size + 1} ({len(batch)} 个分块)...")
+            batch_ids = self.vectorstore.add_documents(batch)
+            ids.extend(batch_ids)
+            
         logger.info(f"✅ 成功添加 {len(ids)} 个文档")
         return ids
 

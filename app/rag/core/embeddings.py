@@ -21,31 +21,40 @@ if not _SSL_VERIFY:
 
 
 class EmbeddingManager:
-    """嵌入模型管理器"""
+    """嵌入模型管理器 - 支持本地和远程 Embedding"""
 
     def __init__(
         self,
-        model_name: str = "text-embedding-3-small",
+        model_name: str = "bge-base-zh-v1.5",
+        embedding_type: Optional[str] = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        chunk_size: Optional[int] = None
+        chunk_size: Optional[int] = None,
+        device: Optional[str] = None
     ):
         """
         初始化嵌入模型管理器
 
         Args:
             model_name: 模型名称
-            api_key: API 密钥
-            base_url: API 基础 URL
+            embedding_type: Embedding 类型 (local/remote)
+            api_key: API 密钥（仅 remote 模式需要）
+            base_url: API 基础 URL（仅 remote 模式需要）
+            chunk_size: 批次大小（仅 remote 模式需要）
+            device: 设备类型 (cpu/cuda)，仅本地模式需要
         """
+        self.embedding_type = embedding_type or os.getenv("EMBEDDING_TYPE", "local")
         self.model_name = model_name
+        self.device = device or os.getenv("EMBEDDING_DEVICE", "cpu")
+
+        # 远程 API 配置
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         self.base_url = base_url or os.getenv("OPENAI_BASE_URL")
-        # 某些兼容 OpenAI 的服务端限制单次 input 数组长度（如 <= 64）
         self.chunk_size = chunk_size or int(os.getenv("EMBEDDING_BATCH_SIZE", "64"))
 
-        if not self.api_key:
-            raise ValueError("❌ OPENAI_API_KEY 未配置")
+        # 验证配置
+        if self.embedding_type == "remote" and not self.api_key:
+            raise ValueError("❌ 远程模式需要配置 OPENAI_API_KEY")
 
         self._embeddings = None
 
@@ -53,17 +62,64 @@ class EmbeddingManager:
     def embeddings(self) -> Embeddings:
         """获取嵌入模型实例（懒加载）"""
         if self._embeddings is None:
-            logger.info(f"初始化嵌入模型: {self.model_name}")
-            emb_kwargs = {
-                "model": self.model_name,
-                "api_key": self.api_key,
-                "base_url": self.base_url,
-                "chunk_size": self.chunk_size,
-            }
-            if not _SSL_VERIFY:
-                emb_kwargs["http_client"] = _http_client
-            self._embeddings = OpenAIEmbeddings(**emb_kwargs)
+            if self.embedding_type == "local":
+                self._embeddings = self._init_local_embeddings()
+            else:
+                self._embeddings = self._init_remote_embeddings()
         return self._embeddings
+
+    def _init_local_embeddings(self) -> Embeddings:
+        """初始化本地 Embedding 模型"""
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings
+        except ImportError:
+            raise ImportError(
+                "本地 Embedding 需要安装 langchain-huggingface 和 sentence-transformers\n"
+                "请运行: pip install langchain-huggingface sentence-transformers"
+            )
+
+        logger.info(f"🔧 初始化本地嵌入模型: {self.model_name} (device={self.device})")
+
+        # 支持的本地模型映射
+        model_map = {
+            "bge-base-zh-v1.5": "BAAI/bge-base-zh-v1.5",
+            "bge-large-zh-v1.5": "BAAI/bge-large-zh-v1.5",
+            "text2vec-base-chinese": "shibing624/text2vec-base-chinese",
+            "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
+            "paraphrase-multilingual-MiniLM-L12-v2": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        }
+
+        # 获取完整模型名称
+        full_model_name = model_map.get(self.model_name, self.model_name)
+
+        embeddings = HuggingFaceEmbeddings(
+            model_name=full_model_name,
+            model_kwargs={'device': self.device},
+            encode_kwargs={'normalize_embeddings': True}
+        )
+
+        logger.info(f"✅ 本地嵌入模型加载成功")
+        logger.info(f"   - 模型: {full_model_name}")
+        logger.info(f"   - 设备: {self.device}")
+        logger.info(f"   - 缓存位置: ~/.cache/huggingface/hub/")
+
+        return embeddings
+
+    def _init_remote_embeddings(self) -> Embeddings:
+        """初始化远程 API Embedding 模型"""
+        logger.info(f"🌐 初始化远程嵌入模型: {self.model_name}")
+        emb_kwargs = {
+            "model": self.model_name,
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+            "chunk_size": self.chunk_size,
+        }
+        if not _SSL_VERIFY:
+            emb_kwargs["http_client"] = _http_client
+
+        embeddings = OpenAIEmbeddings(**emb_kwargs)
+        logger.info(f"✅ 远程嵌入模型配置成功")
+        return embeddings
 
     def embed_query(self, text: str) -> list[float]:
         """
@@ -98,6 +154,13 @@ class EmbeddingManager:
         """
         # 不同模型的维度
         dimensions = {
+            # 本地模型
+            "bge-base-zh-v1.5": 768,
+            "bge-large-zh-v1.5": 1024,
+            "text2vec-base-chinese": 768,
+            "all-MiniLM-L6-v2": 384,
+            "paraphrase-multilingual-MiniLM-L12-v2": 384,
+            # OpenAI 模型
             "text-embedding-3-small": 1536,
             "text-embedding-3-large": 3072,
             "text-embedding-ada-002": 1536,
@@ -105,4 +168,19 @@ class EmbeddingManager:
             "embedding-2": 1024,
             "embedding-3": 1024,  # 可配置256-2048，默认1024
         }
-        return dimensions.get(self.model_name, 1536)
+        return dimensions.get(self.model_name, 768)
+
+    def get_info(self) -> dict:
+        """
+        获取 Embedding 配置信息
+
+        Returns:
+            配置信息字典
+        """
+        return {
+            "type": self.embedding_type,
+            "model": self.model_name,
+            "dimension": self.get_dimension(),
+            "device": self.device if self.embedding_type == "local" else "N/A",
+            "api_endpoint": self.base_url if self.embedding_type == "remote" else "N/A",
+        }

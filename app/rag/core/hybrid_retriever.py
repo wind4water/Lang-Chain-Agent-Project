@@ -186,3 +186,8 @@ class HybridRetriever(BaseRetriever):
 
     async def _aget_relevant_documents(self, query: str) -> List[Document]:
         return await asyncio.to_thread(self._hybrid_search, query)
+
+    @property
+    def _type(self) -> str:
+        """Type of retriever."""
+        return "hybrid_retriever"

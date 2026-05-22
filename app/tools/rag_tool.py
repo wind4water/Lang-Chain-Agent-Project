@@ -22,7 +22,11 @@ class RAGSearchInput(BaseModel):
     )
     metadata_filter: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="可选元数据过滤条件（Chroma filter），例如 {'filename': 'README.md'}"
+        description="可选元数据过滤条件（Chroma filter），如 {'filename': 'README.md'}。注意：仅在用户明确指定了具体文件名或明确要求限制文件类型时才可传入。禁止主动猜测或擅自限制文件范围，否则会导致其他格式的文件（如 .txt、.md）被错误过滤。"
+    )
+    doc_group: Optional[str] = Field(
+        default=None,
+        description="可选的文档分类组。若提问是关于：员工信息、人事规章、基础规范文档、TXT/Markdown 格式的企业文档等，必须传 'documents'；若提问是关于：系统源码、Java/Python/Go 代码实现、接口API设计、Java 实体/枚举定义等，必须传 'projects'。若问题不属于任何一类或较为混杂，请不要传递（保持 None）。"
     )
 
 
@@ -107,13 +111,14 @@ class RAGSearchTool(BaseTool):
         self,
         query: str,
         original_query: Optional[str] = None,
-        metadata_filter: Optional[Dict[str, Any]] = None
+        metadata_filter: Optional[Dict[str, Any]] = None,
+        doc_group: Optional[str] = None
     ) -> str:
         """同步执行（LangChain Tool 要求实现，但不推荐使用）"""
         import asyncio
         try:
             # 同步环境下运行异步代码
-            return asyncio.run(self._arun(query, original_query, metadata_filter))
+            return asyncio.run(self._arun(query, original_query, metadata_filter, doc_group))
         except Exception as e:
             logger.error(f"RAG 工具同步调用失败: {e}")
             return f"知识库搜索失败: {str(e)}"
@@ -122,7 +127,8 @@ class RAGSearchTool(BaseTool):
         self,
         query: str,
         original_query: Optional[str] = None,
-        metadata_filter: Optional[Dict[str, Any]] = None
+        metadata_filter: Optional[Dict[str, Any]] = None,
+        doc_group: Optional[str] = None
     ) -> str:
         """异步执行 RAG 搜索"""
         try:
@@ -132,20 +138,25 @@ class RAGSearchTool(BaseTool):
                 return "❌ 知识库系统未启用。请联系管理员配置 RAG_ENABLED=true"
 
             effective_query = self._pick_effective_query(query=query, original_query=original_query)
+            if metadata_filter:
+                print(f"\n⚠️  [RAG Filter] 检测到活跃的元数据过滤条件: {metadata_filter}")
+                print("💡 提示: 这会把检索范围严格限制在符合过滤条件的文档中，可能会排除其他格式的文件（如 .txt、.md）！\n")
             logger.info(
-                "🔧 ToolStart: name=%s, query=%s, effective_query=%s, original_query=%s, metadata_filter=%s",
+                "🔧 ToolStart: name=%s, query=%s, effective_query=%s, original_query=%s, metadata_filter=%s, doc_group=%s",
                 self.name,
                 query,
                 effective_query,
                 original_query,
                 metadata_filter,
+                doc_group,
             )
 
             # 调用 RAG 系统查询（带来源）
             result = await self.rag_system.query(
                 question=effective_query,
                 with_sources=True,
-                metadata_filter=metadata_filter
+                metadata_filter=metadata_filter,
+                doc_group=doc_group
             )
 
             # 构建返回结果

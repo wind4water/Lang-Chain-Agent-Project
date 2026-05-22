@@ -21,10 +21,76 @@ class DocumentLoader:
 
     # 支持的文件扩展名
     SUPPORTED_EXTENSIONS = {
+        # 文档格式
         '.txt': TextLoader,
         '.md': UnstructuredMarkdownLoader,
         '.pdf': PyPDFLoader,
+        # 代码格式（作为文本加载）
+        '.py': TextLoader,
+        '.java': TextLoader,
+        '.js': TextLoader,
+        '.ts': TextLoader,
+        '.jsx': TextLoader,
+        '.tsx': TextLoader,
+        '.go': TextLoader,
+        '.rs': TextLoader,
+        '.c': TextLoader,
+        '.cpp': TextLoader,
+        '.h': TextLoader,
+        '.hpp': TextLoader,
+        '.cs': TextLoader,
+        '.php': TextLoader,
+        '.rb': TextLoader,
+        '.swift': TextLoader,
+        '.kt': TextLoader,
+        '.scala': TextLoader,
+        '.sh': TextLoader,
+        '.bash': TextLoader,
+        '.yaml': TextLoader,
+        '.yml': TextLoader,
+        '.json': TextLoader,
+        '.xml': TextLoader,
+        '.html': TextLoader,
+        '.css': TextLoader,
+        '.sql': TextLoader,
     }
+
+    # Git 仓库中应该忽略的目录和文件
+    IGNORE_PATTERNS = {
+        # 版本控制
+        '.git', '.svn', '.hg',
+        # 依赖目录
+        'node_modules', 'vendor', 'venv', '.venv', 'env', '__pycache__',
+        # 构建产物
+        'build', 'dist', 'target', 'out', '.next', '.nuxt',
+        # IDE 配置
+        '.idea', '.vscode', '.vs', '*.swp', '*.swo',
+        # 其他
+        '.DS_Store', 'Thumbs.db', '*.log', '*.tmp',
+    }
+
+    @classmethod
+    def should_ignore(cls, path: Path) -> bool:
+        """
+        检查路径是否应该被忽略
+
+        Args:
+            path: 文件或目录路径
+
+        Returns:
+            是否应该忽略
+        """
+        # 检查路径的任何部分是否匹配忽略模式
+        for part in path.parts:
+            if part in cls.IGNORE_PATTERNS:
+                return True
+            # 检查通配符模式（简单实现）
+            for pattern in cls.IGNORE_PATTERNS:
+                if '*' in pattern:
+                    pattern_without_star = pattern.replace('*', '')
+                    if pattern_without_star in part:
+                        return True
+        return False
 
     @classmethod
     def load_file(cls, file_path: str) -> List[Document]:
@@ -55,12 +121,17 @@ class DocumentLoader:
             loader = loader_class(str(file_path))
             documents = loader.load()
 
+            # 判定 doc_group
+            file_path_str = str(file_path).replace("\\", "/")
+            doc_group = "documents" if "data/documents" in file_path_str else "projects"
+
             # 添加元数据
             for doc in documents:
                 doc.metadata.update({
                     "source": str(file_path),
                     "filename": file_path.name,
-                    "extension": extension
+                    "extension": extension,
+                    "doc_group": doc_group
                 })
 
             logger.info(f"✅ 成功加载 {len(documents)} 个文档片段")
@@ -74,12 +145,16 @@ class DocumentLoader:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
 
+                file_path_str = str(file_path).replace("\\", "/")
+                doc_group = "documents" if "data/documents" in file_path_str else "projects"
+
                 return [Document(
                     page_content=content,
                     metadata={
                         "source": str(file_path),
                         "filename": file_path.name,
-                        "extension": extension
+                        "extension": extension,
+                        "doc_group": doc_group
                     }
                 )]
             except Exception as e2:
@@ -127,10 +202,12 @@ class DocumentLoader:
         else:
             files = list(directory_path.glob(glob_pattern))
 
-        # 过滤出支持的文件
+        # 过滤出支持的文件（排除忽略的路径）
         supported_files = [
             f for f in files
-            if f.is_file() and f.suffix.lower() in cls.SUPPORTED_EXTENSIONS
+            if f.is_file()
+            and f.suffix.lower() in cls.SUPPORTED_EXTENSIONS
+            and not cls.should_ignore(f)
         ]
 
         logger.info(f"找到 {len(supported_files)} 个支持的文件")

@@ -10,12 +10,20 @@ class RAGConfig(BaseModel):
     """RAG 配置"""
 
     # 嵌入模型配置
+    embedding_type: str = Field(
+        default_factory=lambda: os.getenv("EMBEDDING_TYPE", "local"),
+        description="嵌入类型: local（本地模型）, remote（远程API）"
+    )
     embedding_model: str = Field(
-        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "embedding-3"),
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "bge-base-zh-v1.5"),
         description="嵌入模型名称"
     )
+    embedding_device: str = Field(
+        default_factory=lambda: os.getenv("EMBEDDING_DEVICE", "cpu"),
+        description="本地模型设备: cpu, cuda"
+    )
     embedding_dimension: int = Field(
-        default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSION", "1024")),
+        default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSION", "768")),
         description="嵌入向量维度"
     )
 
@@ -35,8 +43,8 @@ class RAGConfig(BaseModel):
 
     # 文档路径配置
     documents_path: str = Field(
-        default_factory=lambda: os.getenv("RAG_DOCUMENTS_PATH", "./data/documents"),
-        description="文档目录路径"
+        default_factory=lambda: os.getenv("RAG_DOCUMENTS_PATH", "./data/documents,./data/projects"),
+        description="文档目录路径（支持多个路径，用逗号分隔）"
     )
 
     # 检索配置
@@ -123,6 +131,50 @@ class RAGConfig(BaseModel):
 
     class Config:
         arbitrary_types_allowed = True
+
+    def get_vector_store_path(self) -> str:
+        """
+        根据 embedding 配置生成专属的向量存储路径
+
+        格式：{base_path}/{embedding_type}_{model_name}/
+        例如：
+        - ./data/vectordb/chroma/local_bge-base-zh-v1.5/
+        - ./data/vectordb/chroma/remote_text-embedding-3-small/
+
+        Returns:
+            向量存储路径
+        """
+        # 清理模型名称，替换特殊字符
+        clean_model_name = self.embedding_model.replace("/", "_").replace(":", "_")
+
+        # 生成专属目录名
+        dir_name = f"{self.embedding_type}_{clean_model_name}"
+
+        # 拼接完整路径
+        base_path = self.chroma_path.rstrip("/")
+        return f"{base_path}/{dir_name}"
+
+    def get_registry_path(self) -> str:
+        """
+        根据 embedding 配置生成专属的文档注册表路径
+
+        格式：{base_path}/registry/{embedding_type}_{model_name}.json
+        例如：
+        - ./data/vectordb/registry/local_bge-base-zh-v1.5.json
+        - ./data/vectordb/registry/remote_text-embedding-3-small.json
+
+        Returns:
+            文档注册表路径
+        """
+        # 清理模型名称
+        clean_model_name = self.embedding_model.replace("/", "_").replace(":", "_")
+
+        # 生成专属文件名
+        file_name = f"{self.embedding_type}_{clean_model_name}.json"
+
+        # 拼接完整路径（放在 vectordb 目录下的 registry 子目录）
+        base_path = os.path.dirname(self.chroma_path.rstrip("/"))
+        return f"{base_path}/registry/{file_name}"
 
 
 # 全局配置实例

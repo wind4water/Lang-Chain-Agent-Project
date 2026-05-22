@@ -45,7 +45,7 @@ class PostgresAgent:
 
         # 初始化LLM
         llm_kwargs = {
-            "model": os.getenv("MODEL_NAME", "gpt-4o-mini"),
+            "model": os.getenv("MODEL_NAME", "glm-4.5-air"),
             "temperature": 0.7,
             "api_key": api_key,
             "base_url": os.getenv("OPENAI_BASE_URL"),

@@ -96,19 +96,34 @@ class RAGSystem:
             # 1. 初始化嵌入模型
             logger.info("1️⃣  初始化嵌入模型...")
             self.embedding_manager = EmbeddingManager(
-                model_name=self.config.embedding_model
+                model_name=self.config.embedding_model,
+                embedding_type=self.config.embedding_type,
+                device=self.config.embedding_device
             )
-            logger.info(f"   ✅ 嵌入模型: {self.config.embedding_model}")
+
+            # 显示 Embedding 配置信息
+            emb_info = self.embedding_manager.get_info()
+            logger.info(f"   ✅ 嵌入类型: {emb_info['type']}")
+            logger.info(f"   ✅ 嵌入模型: {emb_info['model']}")
+            logger.info(f"   ✅ 向量维度: {emb_info['dimension']}")
+            if emb_info['type'] == 'local':
+                logger.info(f"   ✅ 运行设备: {emb_info['device']}")
+                logger.info(f"   💡 首次使用会自动下载模型（约 400MB），请耐心等待...")
+            else:
+                logger.info(f"   ✅ API 端点: {emb_info['api_endpoint']}")
 
             # 2. 初始化向量存储
             logger.info("2️⃣  初始化向量存储...")
+            # 根据 embedding 配置生成专属路径
+            vector_store_path = self.config.get_vector_store_path()
             self.vectorstore_manager = VectorStoreManager(
                 embeddings=self.embedding_manager.embeddings,
-                persist_directory=self.config.chroma_path,
+                persist_directory=vector_store_path,
                 collection_name=self.config.collection_name
             )
             logger.info(f"   ✅ 向量数据库: Chroma")
-            logger.info(f"   ✅ 存储路径: {os.path.abspath(self.config.chroma_path)}")
+            logger.info(f"   ✅ 存储路径: {os.path.abspath(vector_store_path)}")
+            logger.info(f"   ℹ️  配置隔离: {self.config.embedding_type}_{self.config.embedding_model}")
 
             # 3. 初始化文本分割器
             logger.info("3️⃣  初始化文本分割器...")
@@ -138,9 +153,18 @@ class RAGSystem:
 
             # 4. 初始化文档注册表
             logger.info("4️⃣  初始化文档注册表...")
-            registry_path = os.path.join(self.config.chroma_path, "document_registry.json")
+            # 根据 embedding 配置生成专属注册表路径
+            registry_path = self.config.get_registry_path()
             self.document_registry = DocumentRegistry(registry_path)
             logger.info(f"   ✅ 注册表: {self.document_registry.get_stats()['total_documents']} 个文档")
+
+            # 4.5 自动更新 Embedding 配置到注册表（首次或配置变化时）
+            emb_info = self.embedding_manager.get_info()
+            self.document_registry.update_embedding_config(
+                embedding_type=emb_info['type'],
+                model_name=emb_info['model'],
+                dimension=emb_info['dimension']
+            )
 
             # 5. 智能同步知识库
             if self.config.rebuild_on_startup:
@@ -162,7 +186,7 @@ class RAGSystem:
             # 6. 初始化 LLM
             logger.info("6️⃣  初始化 LLM...")
             self.llm = ChatOpenAI(
-                model=os.getenv("MODEL_NAME", "gpt-4o-mini"),
+                model=os.getenv("MODEL_NAME", "glm-4.5-air"),
                 temperature=0.7,
                 api_key=os.getenv("OPENAI_API_KEY"),
                 base_url=os.getenv("OPENAI_BASE_URL")
@@ -196,8 +220,12 @@ class RAGSystem:
 
         documents_path = self.config.documents_path
 
-        if not os.path.exists(documents_path):
-            logger.warning(f"文档目录不存在: {documents_path}")
+        # 支持多个文档目录（逗号分隔）
+        doc_paths = [p.strip() for p in documents_path.split(',')]
+        existing_paths = [p for p in doc_paths if os.path.exists(p)]
+
+        if not existing_paths:
+            logger.warning(f"所有文档目录都不存在: {documents_path}")
             return {
                 "status": "skipped",
                 "message": "文档目录不存在",
@@ -208,8 +236,11 @@ class RAGSystem:
             }
 
         try:
-            # 1. 扫描目录，检测变更
-            changes = self.document_registry.scan_directory(documents_path)
+            # 1. 扫描目录，检测变更（支持多路径）
+            changes = self.document_registry.scan_directory(
+                documents_path,
+                supported_extensions=set(DocumentLoader.get_supported_extensions())
+            )
 
             added_files = changes["added"]
             modified_files = changes["modified"]
@@ -234,7 +265,18 @@ class RAGSystem:
             # 2. 处理删除的文档
             for file_path in deleted_files:
                 logger.info(f"❌ 删除: {file_path}")
-                indexed_source = os.path.normpath(os.path.join(documents_path, file_path))
+                # 尝试从所有路径中查找文件
+                indexed_source = None
+                for base_path in doc_paths:
+                    potential_path = os.path.normpath(os.path.join(base_path, file_path))
+                    if os.path.exists(potential_path):
+                        indexed_source = potential_path
+                        break
+
+                if not indexed_source:
+                    # 如果文件已删除，使用第一个路径尝试构建路径
+                    indexed_source = os.path.normpath(os.path.join(doc_paths[0], file_path))
+
                 self.vectorstore_manager.delete_by_source(indexed_source)
                 if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
                     self.es_keyword_retriever.delete_by_source(indexed_source)
@@ -244,17 +286,26 @@ class RAGSystem:
             files_to_process = added_files + modified_files
 
             if files_to_process:
-                # 加载文档
-                full_paths = [os.path.join(documents_path, f) for f in files_to_process]
+                # 加载文档（从多个路径中查找）
                 documents = []
 
-                for file_path in full_paths:
-                    try:
-                        docs = DocumentLoader.load_file(file_path)
-                        documents.extend(docs)
-                        logger.debug(f"加载: {os.path.relpath(file_path, documents_path)} ({len(docs)} 片段)")
-                    except Exception as e:
-                        logger.error(f"加载文档失败 {file_path}: {e}")
+                for file_path in files_to_process:
+                    # 查找文件在哪个基础路径下
+                    found = False
+                    for base_path in doc_paths:
+                        full_path = os.path.join(base_path, file_path)
+                        if os.path.exists(full_path):
+                            try:
+                                docs = DocumentLoader.load_file(full_path)
+                                documents.extend(docs)
+                                logger.debug(f"加载: {os.path.relpath(full_path, base_path)} ({len(docs)} 片段)")
+                                found = True
+                                break
+                            except Exception as e:
+                                logger.error(f"加载文档失败 {full_path}: {e}")
+
+                    if not found:
+                        logger.warning(f"文件未找到: {file_path}")
 
                 if documents:
                     # 分割文档
@@ -265,14 +316,31 @@ class RAGSystem:
                     docs_by_source = {}
                     for doc in split_docs:
                         source = doc.metadata.get("source", "unknown")
-                        rel_source = os.path.relpath(source, documents_path)
+                        # 计算相对路径（基于第一个匹配的基础路径）
+                        rel_source = None
+                        base_path_for_source = None
+                        for base_path in doc_paths:
+                            try:
+                                rel = os.path.relpath(source, base_path)
+                                if not rel.startswith('..'):  # 确保文件在此路径下
+                                    rel_source = rel
+                                    base_path_for_source = base_path
+                                    break
+                            except ValueError:
+                                continue
+
+                        if rel_source is None:
+                            # 回退：使用第一个路径
+                            rel_source = os.path.relpath(source, doc_paths[0])
+                            base_path_for_source = doc_paths[0]
+
                         if rel_source not in docs_by_source:
-                            docs_by_source[rel_source] = []
-                        docs_by_source[rel_source].append(doc)
+                            docs_by_source[rel_source] = ([], base_path_for_source)
+                        docs_by_source[rel_source][0].append(doc)
 
                     # 逐个文档更新向量存储
-                    for rel_source, docs in docs_by_source.items():
-                        abs_source = os.path.join(documents_path, rel_source)
+                    for rel_source, (docs, base_path) in docs_by_source.items():
+                        abs_source = os.path.join(base_path, rel_source)
                         indexed_source = os.path.normpath(abs_source)
 
                         if rel_source in modified_files:
@@ -289,13 +357,23 @@ class RAGSystem:
                         # 更新注册表
                         metadata = self.document_registry.get_file_metadata(
                             abs_source,
-                            documents_path,
+                            base_path,
                             chunk_count=len(docs)
                         )
                         self.document_registry.register_document(metadata)
 
             # 4. 保存注册表
             self.document_registry.save()
+
+            # 4.5 如果有变更，更新 Embedding 配置
+            if total_changes > 0:
+                emb_info = self.embedding_manager.get_info()
+                self.document_registry.update_embedding_config(
+                    embedding_type=emb_info['type'],
+                    model_name=emb_info['model'],
+                    dimension=emb_info['dimension']
+                )
+                self.document_registry.save()
 
             result = {
                 "status": "success",
@@ -324,25 +402,31 @@ class RAGSystem:
 
         documents_path = self.config.documents_path
 
-        if not os.path.exists(documents_path):
-            logger.warning(f"文档目录不存在: {documents_path}，创建空目录")
-            os.makedirs(documents_path, exist_ok=True)
-            return {
-                "status": "skipped",
-                "message": "文档目录为空",
-                "document_count": 0
-            }
+        # 支持多个文档目录（逗号分隔）
+        doc_paths = [p.strip() for p in documents_path.split(',')]
+
+        # 确保至少有一个目录存在
+        existing_paths = []
+        for path in doc_paths:
+            if not os.path.exists(path):
+                logger.warning(f"文档目录不存在: {path}，创建空目录")
+                os.makedirs(path, exist_ok=True)
+            existing_paths.append(path)
 
         try:
-            # 1. 加载文档
-            logger.info(f"📂 从目录加载文档: {os.path.abspath(documents_path)}")
-            documents = DocumentLoader.load_directory(
-                directory_path=documents_path,
-                recursive=True,
-                show_progress=True
-            )
+            # 1. 加载文档（从多个目录）
+            all_documents = []
+            for doc_path in existing_paths:
+                logger.info(f"📂 从目录加载文档: {os.path.abspath(doc_path)}")
+                documents = DocumentLoader.load_directory(
+                    directory_path=doc_path,
+                    recursive=True,
+                    show_progress=True
+                )
+                all_documents.extend(documents)
+                logger.info(f"   ✅ 从 {doc_path} 加载了 {len(documents)} 个文档片段")
 
-            if not documents:
+            if not all_documents:
                 logger.warning("未找到任何文档")
                 return {
                     "status": "skipped",
@@ -350,11 +434,11 @@ class RAGSystem:
                     "document_count": 0
                 }
 
-            logger.info(f"   ✅ 加载了 {len(documents)} 个文档片段")
+            logger.info(f"   ✅ 总共加载了 {len(all_documents)} 个文档片段")
 
             # 2. 文本分割
             logger.info("✂️  分割文档...")
-            split_docs = self.text_splitter.split_documents(documents)
+            split_docs = self.text_splitter.split_documents(all_documents)
             logger.info(f"   ✅ 分割为 {len(split_docs)} 个文本块")
 
             # 3. 重建向量存储
@@ -376,17 +460,32 @@ class RAGSystem:
             docs_by_source = {}
             for doc in split_docs:
                 source = doc.metadata.get("source", "unknown")
-                rel_source = os.path.relpath(source, documents_path)
-                if rel_source not in docs_by_source:
-                    docs_by_source[rel_source] = 0
-                docs_by_source[rel_source] += 1
+                # 查找文件属于哪个基础路径
+                base_path = None
+                for doc_path in doc_paths:
+                    try:
+                        rel = os.path.relpath(source, doc_path)
+                        if not rel.startswith('..'):  # 确保文件在此路径下
+                            base_path = doc_path
+                            break
+                    except ValueError:
+                        continue
+
+                if base_path is None:
+                    base_path = doc_paths[0]  # 回退到第一个路径
+
+                rel_source = os.path.relpath(source, base_path)
+                key = (rel_source, base_path)
+                if key not in docs_by_source:
+                    docs_by_source[key] = 0
+                docs_by_source[key] += 1
 
             # 注册每个文档
-            for rel_source, chunk_count in docs_by_source.items():
-                abs_source = os.path.join(documents_path, rel_source)
+            for (rel_source, base_path), chunk_count in docs_by_source.items():
+                abs_source = os.path.join(base_path, rel_source)
                 metadata = self.document_registry.get_file_metadata(
                     abs_source,
-                    documents_path,
+                    base_path,
                     chunk_count=chunk_count
                 )
                 self.document_registry.register_document(metadata)
@@ -394,9 +493,18 @@ class RAGSystem:
             self.document_registry.save()
             logger.info(f"   ✅ 注册了 {len(docs_by_source)} 个文档")
 
+            # 4.5 更新 Embedding 配置
+            emb_info = self.embedding_manager.get_info()
+            self.document_registry.update_embedding_config(
+                embedding_type=emb_info['type'],
+                model_name=emb_info['model'],
+                dimension=emb_info['dimension']
+            )
+            self.document_registry.save()
+
             result = {
                 "status": "success",
-                "original_documents": len(documents),
+                "original_documents": len(all_documents),
                 "split_documents": len(split_docs),
                 "indexed_documents": len(ids),
                 "registered_files": len(docs_by_source),
@@ -417,7 +525,8 @@ class RAGSystem:
         self,
         question: str,
         with_sources: bool = True,
-        metadata_filter: Optional[Dict[str, Any]] = None
+        metadata_filter: Optional[Dict[str, Any]] = None,
+        doc_group: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         RAG 查询
@@ -426,12 +535,35 @@ class RAGSystem:
             question: 用户问题
             with_sources: 是否返回来源信息
             metadata_filter: 元数据过滤条件（例如 {"filename": "xxx.md"}）
+            doc_group: 可选的文档分组隔离（'documents' 或 'projects'）
 
         Returns:
             查询结果
         """
         if not self._initialized:
             raise RuntimeError("RAG 系统未初始化")
+
+        # 1. 意图检测与检索范围收窄路由
+        if not doc_group:
+            # 方式 B: 基于轻量级关键词进行智能范围收窄
+            q_lower = (question or "").lower()
+            person_keywords = ["员工", "谁", "人", "同事", "部门", "口头禅", "岗位", "入职", "作者"]
+            code_keywords = ["代码", "方法", "接口", "实现", "类", "enum", "枚举", "字段", "java", "xml", "class"]
+            
+            if any(k in q_lower for k in person_keywords):
+                doc_group = "documents"
+                logger.info(f"🧭 RAG 智能路由: 检测到员工/人相关的关键词，自动收窄检索范围至 doc_group='documents'")
+                print(f"🧭 [RAG Router] 智能路由：检测到人物/人事相关意图，自动收窄检索范围至 doc_group='documents'")
+            elif any(k in q_lower for k in code_keywords):
+                doc_group = "projects"
+                logger.info(f"🧭 RAG 智能路由: 检测到代码/技术相关的关键词，自动收窄检索范围至 doc_group='projects'")
+                print(f"🧭 [RAG Router] 智能路由：检测到技术/代码相关意图，自动收窄检索范围至 doc_group='projects'")
+
+        # 2. 如果存在 doc_group 约束，合并入 metadata_filter
+        if doc_group:
+            if not metadata_filter:
+                metadata_filter = {}
+            metadata_filter["doc_group"] = doc_group
 
         try:
             query_chain = self.rag_chain

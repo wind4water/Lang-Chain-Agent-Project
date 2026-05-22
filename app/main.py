@@ -443,6 +443,10 @@ class RAGQueryRequest(BaseModel):
         default=None,
         description="可选的元数据过滤条件（Chroma filter），例如 {\"filename\": \"README.md\"}"
     )
+    doc_group: str | None = Field(
+        default=None,
+        description="可选的文档分组收窄条件（'documents' 或 'projects'）"
+    )
 
 
 class RAGQueryResponse(BaseModel):
@@ -474,7 +478,8 @@ async def rag_query(request: RAGQueryRequest):
             result = await rag_system.query(
                 question=request.question,
                 with_sources=request.with_sources,
-                metadata_filter=request.metadata_filter
+                metadata_filter=request.metadata_filter,
+                doc_group=request.doc_group
             )
 
             return _with_request_tokens(result)

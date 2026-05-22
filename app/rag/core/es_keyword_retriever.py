@@ -109,6 +109,7 @@ class ESKeywordRetriever:
                         "fields": {"keyword": {"type": "keyword"}}
                     },
                     "extension": {"type": "keyword"},
+                    "doc_group": {"type": "keyword"},
                     "start_index": {"type": "integer"},
                     "metadata": {"type": "object", "enabled": True},
                 }
@@ -142,6 +143,7 @@ class ESKeywordRetriever:
             source = str(metadata.get("source", ""))
             filename = str(metadata.get("filename", ""))
             extension = str(metadata.get("extension", ""))
+            doc_group = str(metadata.get("doc_group", ""))
             start_index = metadata.get("start_index", 0)
             try:
                 start_index = int(start_index)
@@ -157,6 +159,7 @@ class ESKeywordRetriever:
                     "source": source,
                     "filename": filename,
                     "extension": extension,
+                    "doc_group": doc_group,
                     "start_index": start_index,
                     "metadata": metadata,
                 }
@@ -210,7 +213,7 @@ class ESKeywordRetriever:
         clauses: List[Dict[str, Any]] = []
         for key, value in metadata_filter.items():
             # 常用字段直接匹配；其余元数据走 metadata.<key>
-            if key in {"source", "extension"}:
+            if key in {"source", "extension", "doc_group"}:
                 clauses.append({"term": {key: value}})
             elif key == "filename":
                 clauses.append({"term": {"filename.keyword": value}})

@@ -23,6 +23,14 @@ class DocumentMetadata:
     chunk_count: int  # 分块数量
 
 
+@dataclass
+class EmbeddingConfig:
+    """Embedding 配置信息"""
+    embedding_type: str  # local 或 remote
+    model_name: str  # 模型名称
+    dimension: int  # 向量维度
+
+
 class DocumentRegistry:
     """
     文档注册表 - 管理已索引文档的元数据
@@ -42,6 +50,7 @@ class DocumentRegistry:
         """
         self.registry_path = registry_path
         self.documents: Dict[str, DocumentMetadata] = {}
+        self.embedding_config: Optional[EmbeddingConfig] = None
 
         # 确保目录存在
         os.makedirs(os.path.dirname(registry_path), exist_ok=True)
@@ -54,25 +63,46 @@ class DocumentRegistry:
         if not os.path.exists(self.registry_path):
             logger.info("注册表文件不存在，创建新注册表")
             self.documents = {}
+            self.embedding_config = None
             return
 
         try:
             with open(self.registry_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+
+                # 加载文档
                 self.documents = {
-                    k: DocumentMetadata(**v) for k, v in data.items()
+                    k: DocumentMetadata(**v)
+                    for k, v in data.get("documents", {}).items()
                 }
+
+                # 加载 embedding 配置
+                if "embedding_config" in data and data["embedding_config"]:
+                    self.embedding_config = EmbeddingConfig(**data["embedding_config"])
+                else:
+                    self.embedding_config = None
+
             logger.info(f"加载注册表: {len(self.documents)} 个文档")
+            if self.embedding_config:
+                logger.info(
+                    f"  Embedding: {self.embedding_config.embedding_type} "
+                    f"({self.embedding_config.model_name}, "
+                    f"{self.embedding_config.dimension}D)"
+                )
         except Exception as e:
             logger.error(f"加载注册表失败: {e}")
             self.documents = {}
+            self.embedding_config = None
 
     def save(self):
         """保存注册表到文件"""
         try:
             with open(self.registry_path, 'w', encoding='utf-8') as f:
                 data = {
-                    k: asdict(v) for k, v in self.documents.items()
+                    "documents": {
+                        k: asdict(v) for k, v in self.documents.items()
+                    },
+                    "embedding_config": asdict(self.embedding_config) if self.embedding_config else None
                 }
                 json.dump(data, f, indent=2, ensure_ascii=False)
             logger.debug(f"保存注册表: {len(self.documents)} 个文档")
@@ -182,67 +212,87 @@ class DocumentRegistry:
     def scan_directory(
         self,
         documents_path: str,
-        supported_extensions: Set[str] = {".txt", ".md", ".pdf"}
+        supported_extensions: Set[str] = {".txt", ".md", ".pdf"},
+        ignore_patterns: Optional[Set[str]] = None
     ) -> Dict[str, List[str]]:
         """
         扫描文档目录，检测变更
 
         Args:
-            documents_path: 文档目录路径
+            documents_path: 文档目录路径（支持多个路径用逗号分隔）
             supported_extensions: 支持的文件扩展名
+            ignore_patterns: 要忽略的路径模式（如 .git, node_modules）
 
         Returns:
             变更分类：{"added": [...], "modified": [...], "deleted": [...]}
         """
-        if not os.path.exists(documents_path):
-            logger.warning(f"文档目录不存在: {documents_path}")
-            return {"added": [], "modified": [], "deleted": []}
+        from app.rag.loaders.document_loader import DocumentLoader
 
-        logger.info(f"扫描文档目录: {documents_path}")
+        # 支持多个文档目录（用逗号分隔）
+        doc_paths = [p.strip() for p in documents_path.split(',')]
 
         added = []
         modified = []
         current_files = set()
 
-        # 遍历目录
-        for root, _, files in os.walk(documents_path):
-            for file in files:
-                # 检查文件扩展名
-                ext = os.path.splitext(file)[1].lower()
-                if ext not in supported_extensions:
+        for base_path in doc_paths:
+            if not os.path.exists(base_path):
+                logger.warning(f"文档目录不存在: {base_path}")
+                continue
+
+            logger.info(f"扫描文档目录: {base_path}")
+
+            # 遍历目录
+            for root, _, files in os.walk(base_path):
+                root_path = Path(root)
+
+                # 检查当前目录是否应该被忽略
+                if DocumentLoader.should_ignore(root_path):
                     continue
 
-                file_path = os.path.join(root, file)
-                rel_path = os.path.relpath(file_path, documents_path)
-                current_files.add(rel_path)
+                for file in files:
+                    # 检查文件扩展名
+                    ext = os.path.splitext(file)[1].lower()
+                    if ext not in supported_extensions:
+                        continue
 
-                # 获取当前文件元数据（不计算哈希，快速扫描）
-                try:
-                    stat = os.stat(file_path)
-                    current_metadata = DocumentMetadata(
-                        file_path=rel_path,
-                        abs_path=os.path.abspath(file_path),
-                        last_modified=stat.st_mtime,
-                        file_hash="",  # 暂不计算
-                        file_size=stat.st_size,
-                        chunk_count=0
-                    )
+                    file_path = os.path.join(root, file)
+                    file_path_obj = Path(file_path)
 
-                    # 检查是否是新文件或已修改
-                    if not self.is_registered(rel_path):
-                        added.append(rel_path)
-                    else:
-                        old_metadata = self.documents[rel_path]
-                        # 快速检查（时间+大小）
-                        if (old_metadata.last_modified != current_metadata.last_modified or
-                            old_metadata.file_size != current_metadata.file_size):
-                            # 需要计算哈希确认
-                            current_metadata.file_hash = self.compute_file_hash(file_path)
-                            if old_metadata.file_hash != current_metadata.file_hash:
-                                modified.append(rel_path)
+                    # 检查文件路径是否应该被忽略
+                    if DocumentLoader.should_ignore(file_path_obj):
+                        continue
 
-                except Exception as e:
-                    logger.error(f"扫描文件失败 {file_path}: {e}")
+                    rel_path = os.path.relpath(file_path, base_path)
+                    current_files.add(rel_path)
+
+                    # 获取当前文件元数据（不计算哈希，快速扫描）
+                    try:
+                        stat = os.stat(file_path)
+                        current_metadata = DocumentMetadata(
+                            file_path=rel_path,
+                            abs_path=os.path.abspath(file_path),
+                            last_modified=stat.st_mtime,
+                            file_hash="",  # 暂不计算
+                            file_size=stat.st_size,
+                            chunk_count=0
+                        )
+
+                        # 检查是否是新文件或已修改
+                        if not self.is_registered(rel_path):
+                            added.append(rel_path)
+                        else:
+                            old_metadata = self.documents[rel_path]
+                            # 快速检查（时间+大小）
+                            if (old_metadata.last_modified != current_metadata.last_modified or
+                                old_metadata.file_size != current_metadata.file_size):
+                                # 需要计算哈希确认
+                                current_metadata.file_hash = self.compute_file_hash(file_path)
+                                if old_metadata.file_hash != current_metadata.file_hash:
+                                    modified.append(rel_path)
+
+                    except Exception as e:
+                        logger.error(f"扫描文件失败 {file_path}: {e}")
 
         # 检查已删除的文件
         registered_files = set(self.documents.keys())
@@ -266,13 +316,75 @@ class DocumentRegistry:
         total_chunks = sum(doc.chunk_count for doc in self.documents.values())
         total_size = sum(doc.file_size for doc in self.documents.values())
 
-        return {
+        stats = {
             "total_documents": len(self.documents),
             "total_chunks": total_chunks,
             "total_size_bytes": total_size,
             "total_size_mb": round(total_size / 1024 / 1024, 2),
             "registry_path": self.registry_path
         }
+
+        # 添加 embedding 配置信息
+        if self.embedding_config:
+            stats["embedding_type"] = self.embedding_config.embedding_type
+            stats["embedding_model"] = self.embedding_config.model_name
+            stats["embedding_dimension"] = self.embedding_config.dimension
+
+        return stats
+
+    def update_embedding_config(self, embedding_type: str, model_name: str, dimension: int):
+        """
+        更新 Embedding 配置
+
+        Args:
+            embedding_type: local 或 remote
+            model_name: 模型名称
+            dimension: 向量维度
+        """
+        self.embedding_config = EmbeddingConfig(
+            embedding_type=embedding_type,
+            model_name=model_name,
+            dimension=dimension
+        )
+        logger.info(f"更新 Embedding 配置: {embedding_type} / {model_name} / {dimension}D")
+
+    def check_embedding_config_changed(
+        self,
+        embedding_type: str,
+        model_name: str,
+        dimension: int
+    ) -> bool:
+        """
+        检查 Embedding 配置是否发生变化
+
+        Args:
+            embedding_type: 当前的 embedding 类型
+            model_name: 当前的模型名称
+            dimension: 当前的向量维度
+
+        Returns:
+            True 表示配置已变化，需要重建索引
+        """
+        # 如果没有历史配置，不算变化
+        if not self.embedding_config:
+            return False
+
+        # 检查是否有任何配置项不同
+        changed = (
+            self.embedding_config.embedding_type != embedding_type
+            or self.embedding_config.model_name != model_name
+            or self.embedding_config.dimension != dimension
+        )
+
+        if changed:
+            logger.warning("⚠️ 检测到 Embedding 配置变化：")
+            logger.warning(f"   旧配置: {self.embedding_config.embedding_type} / "
+                          f"{self.embedding_config.model_name} / "
+                          f"{self.embedding_config.dimension}D")
+            logger.warning(f"   新配置: {embedding_type} / {model_name} / {dimension}D")
+            logger.warning("   需要重建向量库以保持一致性！")
+
+        return changed
 
     def clear(self):
         """清空注册表"""

@@ -8,7 +8,7 @@ SqliteAgent with Tool Calling
 3. 上下文压缩 - 支持多种压缩策略
 """
 
-from typing import Annotated, List, Optional, Any
+from typing import Annotated, List, Optional, Any, Dict
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
@@ -22,6 +22,7 @@ import aiosqlite
 
 from app.tools.loader import load_all_tools
 from app.token_usage import record_llm_token_usage
+from app.planner import TaskPlanner, TaskExecutor, TaskPlan
 
 # ============ Langfuse 集成 ============
 import logging
@@ -35,19 +36,6 @@ try:
 except ImportError:
     LANGFUSE_AVAILABLE = False
     Langfuse = None
-
-try:
-    # Langfuse LangChain 回调（优先新版导入路径）
-    from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
-    LANGFUSE_CALLBACK_AVAILABLE = True
-except ImportError:
-    try:
-        # 兼容部分版本
-        from langfuse.langchain import CallbackHandler as LangfuseCallbackHandler
-        LANGFUSE_CALLBACK_AVAILABLE = True
-    except ImportError:
-        LANGFUSE_CALLBACK_AVAILABLE = False
-        LangfuseCallbackHandler = None
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +93,11 @@ class ToolEventCollectorCallback(BaseCallbackHandler):
             "tool_name": tool_name,
             "input_preview": self._clip(input_str),
         })
+        # 漂亮地打印到控制台
+        print("\n" + "🔧" * 40)
+        print(f"🛠️  [Tool Start] 正在调用工具: {tool_name}")
+        print(f"📥 [Input] 输入参数: {input_str}")
+        print("🔧" * 40 + "\n")
 
     def on_tool_end(self, output: Any, **kwargs: Any) -> Any:
         tool_name = kwargs.get("name") or (self._tool_name_stack.pop() if self._tool_name_stack else "unknown_tool")
@@ -113,6 +106,14 @@ class ToolEventCollectorCallback(BaseCallbackHandler):
             "tool_name": tool_name,
             "output_preview": self._clip(output),
         })
+        # 漂亮地打印到控制台
+        print("\n" + "✅" * 40)
+        print(f"✅ [Tool End] 工具执行完毕: {tool_name}")
+        if tool_name == "knowledge_base_search":
+            print(f"📚 [RAG Output] 知识库返回结果:\n{output}")
+        else:
+            print(f"📤 [Output] 工具返回结果:\n{output}")
+        print("✅" * 40 + "\n")
 
     def on_tool_error(self, error: BaseException, **kwargs: Any) -> Any:
         tool_name = kwargs.get("name") or (self._tool_name_stack.pop() if self._tool_name_stack else "unknown_tool")
@@ -121,6 +122,11 @@ class ToolEventCollectorCallback(BaseCallbackHandler):
             "tool_name": tool_name,
             "error": self._clip(error),
         })
+        # 漂亮地打印到控制台
+        print("\n" + "❌" * 40)
+        print(f"❌ [Tool Error] 工具执行出错: {tool_name}")
+        print(f"⚠️ [Error Detail] 错误信息: {error}")
+        print("❌" * 40 + "\n")
 
 
 class SqliteAgentWithTools:
@@ -134,7 +140,7 @@ class SqliteAgentWithTools:
 
         # 初始化LLM
         llm_kwargs = {
-            "model": os.getenv("MODEL_NAME", "gpt-4o-mini"),
+            "model": os.getenv("MODEL_NAME", "glm-4.5-air"),
             "temperature": 0.7,
             "api_key": api_key,
             "base_url": os.getenv("OPENAI_BASE_URL"),
@@ -190,13 +196,11 @@ class SqliteAgentWithTools:
                         self.langfuse_client = Langfuse(**langfuse_kwargs)
                         self.langfuse_enabled = True
                         self.langfuse_sample_rate = float(os.getenv("LANGFUSE_SAMPLE_RATE", "1.0"))
-                        self.langfuse_callback_enabled = LANGFUSE_CALLBACK_AVAILABLE
+                        # 强制使用手动单根 trace 模式，避免 callback 导致多根 trace 分裂
+                        self.langfuse_callback_enabled = False
 
                         logger.info("✅ Langfuse 监控已启用")
-                        if self.langfuse_callback_enabled:
-                            logger.info("✅ Langfuse callback 已启用（自动采集 tool/chain 调用）")
-                        else:
-                            logger.warning("⚠️ 未检测到 Langfuse callback，自动 tool 链路采集不可用")
+                        logger.info("✅ Langfuse 手动单根 trace 模式已启用")
                         print(f"✅ Langfuse 监控已启用 (采样率: {self.langfuse_sample_rate*100:.0f}%)")
 
                 except Exception as e:
@@ -231,7 +235,7 @@ class SqliteAgentWithTools:
         self.summary_llm = None
         if self.compression_strategy == "summary":
             summary_kwargs = {
-                "model": os.getenv("SUMMARY_MODEL_NAME", "gpt-4o-mini"),
+                "model": os.getenv("SUMMARY_MODEL_NAME", "glm-4.5-air"),
                 "temperature": 0.3,
                 "api_key": api_key,
                 "base_url": os.getenv("OPENAI_BASE_URL"),
@@ -240,6 +244,16 @@ class SqliteAgentWithTools:
                 summary_kwargs["http_async_client"] = _http_async_client
                 summary_kwargs["http_client"] = _http_client
             self.summary_llm = ChatOpenAI(**summary_kwargs)
+
+        # 任务规划（Plan-and-Execute）配置
+        self.enable_task_planner = os.getenv("ENABLE_TASK_PLANNER", "false").lower() == "true"
+        self.task_planner_trigger = os.getenv("TASK_PLANNER_TRIGGER", "auto").lower()
+        self.task_planner_max_tasks = int(os.getenv("TASK_PLANNER_MAX_TASKS", "5"))
+        self.task_planner: Optional[TaskPlanner] = None
+        self.task_executor: Optional[TaskExecutor] = None
+        if self.enable_task_planner:
+            self.task_planner = TaskPlanner(llm=self.llm, max_tasks=self.task_planner_max_tasks)
+            self.task_executor = TaskExecutor(llm=self.llm)
 
         # checkpointer 和 graph 将在首次使用时初始化
         self._conn = None
@@ -250,6 +264,10 @@ class SqliteAgentWithTools:
         print(f"✅ 上下文压缩策略: {self.compression_strategy}")
         print(f"✅ 工具调用: {'启用' if enable_tools else '禁用'}")
         print(f"✅ 工具调用温度: {self.tool_call_temperature}")
+        print(
+            f"✅ 任务规划: {'启用' if self.enable_task_planner else '禁用'} "
+            f"(trigger={self.task_planner_trigger}, max_tasks={self.task_planner_max_tasks})"
+        )
 
     def _log_tool_trace_summary(self, session_id: str, tool_events: list[dict[str, Any]]) -> None:
         """打印单次请求工具调用摘要，便于定位 tool 链路。"""
@@ -274,29 +292,73 @@ class SqliteAgentWithTools:
                 error,
             )
 
+    @staticmethod
+    def _is_complex_question(message: str) -> bool:
+        text = (message or "").strip()
+        if not text:
+            return False
+        indicators = ["并且", "以及", "同时", "然后", "再", "最后", "分别", "另外", "还有", "除此之外"]
+        multi_question = text.count("？") + text.count("?") >= 2
+        has_indicator = any(x in text for x in indicators)
+        return multi_question or has_indicator or len(text) > 80
+
+    def _should_use_task_planner(self, message: str) -> bool:
+        if not self.enable_task_planner or self.task_planner is None or self.task_executor is None:
+            return False
+        trigger = self.task_planner_trigger
+        if trigger == "off":
+            return False
+        if trigger == "always":
+            return True
+        # 默认 auto
+        return self._is_complex_question(message)
+
+    async def _persist_planner_turn(self, session_id: str, user_text: str, assistant_text: str) -> None:
+        """将 planner 路径的问答写回会话状态，保证多轮上下文连续。"""
+        config = {"configurable": {"thread_id": session_id}}
+        as_node = "agent" if (self.enable_tools and len(self.tools) > 0) else "chat"
+        await self.graph.aupdate_state(
+            config,
+            {"messages": [HumanMessage(content=user_text), AIMessage(content=assistant_text)]},
+            as_node=as_node,
+        )
+
+    async def _run_task_planner(self, message: str) -> Optional[Dict[str, Any]]:
+        if not self._should_use_task_planner(message):
+            return None
+        assert self.task_planner is not None
+        assert self.task_executor is not None
+
+        plan: Optional[TaskPlan] = await self.task_planner.aplan(message)
+        if plan is None or not plan.tasks:
+            logger.info("🧭 Planner 未产出有效任务，回退默认流程")
+            return None
+
+        logger.info("🧭 Planner 已启用: tasks=%s", len(plan.tasks))
+        for task in plan.tasks:
+            logger.info(
+                "🧭 PlanTask: order=%s, id=%s, mode=%s, objective=%s",
+                task.order,
+                task.id,
+                task.mode.value,
+                task.objective,
+            )
+
+        execution = await self.task_executor.aexecute(
+            original_question=message,
+            plan=plan,
+        )
+        return {
+            "plan": plan,
+            "task_results": execution.get("task_results", []),
+            "final_answer": execution.get("final_answer", ""),
+        }
+
     def _create_run_callbacks(self, session_id: str, user_message: str, stream: bool):
-        """构建本次请求 callbacks（Langfuse 自动链路 + tool 事件采集）。"""
+        """构建本次请求 callbacks（仅工具事件采集，不挂载 Langfuse callback）。"""
         callbacks: list[Any] = []
         tool_collector = ToolEventCollectorCallback()
         callbacks.append(tool_collector)
-
-        langfuse_callback_active = False
-        if (
-            self.langfuse_enabled
-            and self.langfuse_callback_enabled
-            and self.langfuse_public_key
-            and self.langfuse_secret_key
-            and random.random() <= self.langfuse_sample_rate
-        ):
-            trace_name = user_message[:50] + "..." if len(user_message) > 50 else user_message
-            try:
-                # Langfuse 4.x 的 LangChain CallbackHandler 仅支持少量构造参数，
-                # session_id/trace_name/tags 通过 LangChain metadata/tags 透传。
-                handler = LangfuseCallbackHandler(public_key=self.langfuse_public_key)
-                callbacks.append(handler)
-                langfuse_callback_active = True
-            except Exception as e:
-                logger.warning("Langfuse callback 创建失败，回退手动 observation: %s", e)
 
         run_metadata = {
             "langfuse_session_id": session_id,
@@ -304,11 +366,11 @@ class SqliteAgentWithTools:
             "session_id": session_id,
             "enable_tools": self.enable_tools,
             "stream": stream,
-            "trace_mode": "callback" if langfuse_callback_active else "manual_fallback",
+            "trace_mode": "manual_single_root",
         }
         run_tags = ["stream" if stream else "chat", "langgraph", "tool-calling"]
 
-        return callbacks, tool_collector, langfuse_callback_active, run_metadata, run_tags
+        return callbacks, tool_collector, run_metadata, run_tags
 
     def _create_manual_observation(
         self,
@@ -316,7 +378,7 @@ class SqliteAgentWithTools:
         message: str,
         stream: bool = False,
     ):
-        """手动 observation 兜底（当 callback 不可用时使用）。"""
+        """手动创建单根 observation（每次请求只创建一个根记录）。"""
         if not self.langfuse_enabled or not self.langfuse_client:
             return None
         if random.random() > self.langfuse_sample_rate:
@@ -333,7 +395,7 @@ class SqliteAgentWithTools:
                     "session_id": session_id,
                     "enable_tools": self.enable_tools,
                     "stream": stream,
-                    "trace_mode": "manual_fallback",
+                    "trace_mode": "manual_single_root",
                 },
             )
         except Exception as e:
@@ -505,20 +567,77 @@ class SqliteAgentWithTools:
         """处理用户消息（包含Token统计和Langfuse追踪）"""
         await self._ensure_initialized()
 
-        callbacks, tool_collector, callback_active, run_metadata, run_tags = self._create_run_callbacks(
+        callbacks, tool_collector, run_metadata, run_tags = self._create_run_callbacks(
             session_id=session_id,
             user_message=message,
             stream=False,
         )
-        observation = None if callback_active else self._create_manual_observation(
+        observation = self._create_manual_observation(
             session_id=session_id,
             message=message,
             stream=False,
         )
-        if callback_active:
-            logger.info("🟢 Langfuse callback tracing 已启用（chat）")
-        elif observation:
-            logger.info("🟢 Langfuse manual observation 已启用（chat fallback）")
+        if observation:
+            logger.info("🟢 Langfuse 手动单根 trace 已启用（chat）")
+
+        # 记录请求开始时间
+        import time
+        start_time = time.time()
+
+        planner_result = await self._run_task_planner(message)
+        if planner_result is not None:
+            response_text = planner_result.get("final_answer", "") or "没有收到有效回复"
+            await self._persist_planner_turn(
+                session_id=session_id,
+                user_text=message,
+                assistant_text=response_text,
+            )
+            prompt_tokens = len(message) // 3
+            completion_tokens = len(response_text) // 3
+            if prompt_tokens > 0 or completion_tokens > 0:
+                record_llm_token_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model_name=self.llm.model_name,
+                )
+                try:
+                    await self._save_token_usage(
+                        session_id=session_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        model_name=self.llm.model_name,
+                    )
+                except Exception as e:
+                    print(f"⚠️ Token统计保存失败: {e}")
+
+            elapsed = time.time() - start_time
+            logger.info(
+                "📥 Planner 调用完成: elapsed=%.2fs, tasks=%s",
+                elapsed,
+                len(planner_result.get("task_results", [])),
+            )
+            self._log_tool_trace_summary(session_id=session_id, tool_events=tool_collector.events)
+
+            if observation:
+                try:
+                    observation.update(
+                        output={"response": response_text},
+                        metadata={
+                            "tool_events": tool_collector.events,
+                            "planner_used": True,
+                            "planner_task_count": len(planner_result.get("task_results", [])),
+                        },
+                        usage_details={
+                            "input": prompt_tokens,
+                            "output": completion_tokens,
+                        },
+                    )
+                    observation.end()
+                    logger.info("✅ Langfuse generation 已完成")
+                except Exception as e:
+                    logger.warning(f"Langfuse generation 结束失败: {e}")
+
+            return response_text
 
         config = {
             "configurable": {"thread_id": session_id},
@@ -528,10 +647,6 @@ class SqliteAgentWithTools:
         if callbacks:
             config["callbacks"] = callbacks
         user_message = HumanMessage(content=message)
-
-        # 记录请求开始时间
-        import time
-        start_time = time.time()
 
         logger.info("📤 开始调用 LangGraph: session_id=%s", session_id)
 
@@ -810,6 +925,7 @@ class SqliteAgentWithTools:
             # 智谱AI 模型
             'glm-4-flash': {'input': 0.0001, 'output': 0.0001},
             'glm-4': {'input': 0.001, 'output': 0.001},
+            'glm-4.5-air': {'input': 0.0, 'output': 0.0},
             # 默认价格（未知模型）
             'default': {'input': 0, 'output': 0}
         }
@@ -1035,20 +1151,79 @@ class SqliteAgentWithTools:
         """
         await self._ensure_initialized()
 
-        callbacks, tool_collector, callback_active, run_metadata, run_tags = self._create_run_callbacks(
+        callbacks, tool_collector, run_metadata, run_tags = self._create_run_callbacks(
             session_id=session_id,
             user_message=message,
             stream=True,
         )
-        observation = None if callback_active else self._create_manual_observation(
+        observation = self._create_manual_observation(
             session_id=session_id,
             message=message,
             stream=True,
         )
-        if callback_active:
-            logger.info("🟢 Langfuse callback tracing 已启用（stream）")
-        elif observation:
-            logger.info("🟢 Langfuse manual observation 已启用（stream fallback）")
+        if observation:
+            logger.info("🟢 Langfuse 手动单根 trace 已启用（stream）")
+
+        import time
+        start_time = time.time()
+
+        planner_result = await self._run_task_planner(message)
+        if planner_result is not None:
+            response_text = planner_result.get("final_answer", "") or "没有收到有效回复"
+            await self._persist_planner_turn(
+                session_id=session_id,
+                user_text=message,
+                assistant_text=response_text,
+            )
+
+            for chunk in response_text:
+                yield chunk
+
+            prompt_tokens = len(message) // 3
+            completion_tokens = len(response_text) // 3
+            if prompt_tokens > 0 or completion_tokens > 0:
+                record_llm_token_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model_name=self.llm.model_name,
+                )
+                try:
+                    await self._save_token_usage(
+                        session_id=session_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        model_name=self.llm.model_name,
+                    )
+                except Exception as e:
+                    print(f"⚠️ Token统计保存失败: {e}")
+
+            if observation:
+                try:
+                    observation.update(
+                        output={"response": response_text},
+                        metadata={
+                            "tool_events": tool_collector.events,
+                            "planner_used": True,
+                            "planner_task_count": len(planner_result.get("task_results", [])),
+                        },
+                        usage_details={
+                            "input": prompt_tokens,
+                            "output": completion_tokens,
+                        },
+                    )
+                    observation.end()
+                    logger.info("✅ Langfuse generation 已完成（流式）")
+                except Exception as e:
+                    logger.warning(f"Langfuse generation 结束失败: {e}")
+
+            elapsed = time.time() - start_time
+            logger.info(
+                "📥 Planner 流式调用完成: elapsed=%.2fs, tasks=%s",
+                elapsed,
+                len(planner_result.get("task_results", [])),
+            )
+            self._log_tool_trace_summary(session_id=session_id, tool_events=tool_collector.events)
+            return
 
         config = {
             "configurable": {"thread_id": session_id},

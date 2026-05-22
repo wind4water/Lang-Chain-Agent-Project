@@ -12,6 +12,7 @@
 - ✅ **异步处理**: 全异步架构，高性能
 - ⭐ **Tool Calling**: Agent自动判断并调用工具完成任务（日期、搜索、天气、计算器、知识库等10个内置工具）
 - ⭐ **RAG知识库**: 支持文档检索增强生成，Agent可自动查询内部知识库（TXT/MD/PDF格式）
+- ⭐ **本地Embedding**: 支持本地向量化模型，完全免费，无需API调用（推荐使用 bge-base-zh-v1.5）
 - ⭐ **上下文压缩**: 支持3种压缩策略（滑动窗口、Token计数、智能摘要），防止token超限
 - ⭐ **流式响应**: 支持SSE流式输出，实时显示AI回复
 - ⭐ **Token统计**: 完整的Token使用统计和成本追踪（按会话、按天、按月）
@@ -77,7 +78,8 @@ LangChainProject/
 │       └── ...
 │
 ├── data/                        # 数据目录（自动创建）
-│   ├── documents/               # RAG 文档目录
+│   ├── documents/               # RAG 普通文档目录
+│   ├── projects/                # RAG Git 仓库项目目录（⭐ 新）
 │   ├── chroma/                  # 向量数据库
 │   └── checkpoints.db           # SQLite 数据库
 ├── requirements.txt             # 项目依赖
@@ -108,7 +110,7 @@ cp .env.example .env
 # ========================================
 OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_BASE_URL=https://api.openai.com/v1
-MODEL_NAME=gpt-4o-mini
+MODEL_NAME=glm-4.5-air
 
 # ========================================
 # 工具系统配置（⭐ 新功能）
@@ -132,8 +134,40 @@ COMPRESSION_WINDOW_SIZE=10  # 滑动窗口保留的对话轮数
 # ========================================
 # 是否启用 RAG 知识库功能
 RAG_ENABLED=true  # 默认启用，Agent可自动查询内部知识库
+
+# ========================================
+# Embedding 配置（向量化）⭐ 新功能
+# ========================================
+# Embedding 类型
+# local: 本地模型（推荐，免费，无需 API 调用）⭐
+# remote: 远程 API（OpenAI/智谱AI，按量计费）
+EMBEDDING_TYPE=local
+
+# Embedding 模型
+# 【本地模型】- 完全免费，首次使用自动下载（约 400MB）
+#   bge-base-zh-v1.5: 中文最佳（默认）⭐
+#   all-MiniLM-L6-v2: 英文轻量
+# 【远程模型】- 需要 API Key
+#   text-embedding-3-small: OpenAI
+EMBEDDING_MODEL=bge-base-zh-v1.5
+
+# 本地模型设备（仅 local 模式）
+# cpu: 使用 CPU（默认）
+# cuda: 使用 GPU（需要 CUDA 支持）
+EMBEDDING_DEVICE=cpu
+
+# ⭐ 配置隔离机制（v2.0+）
+# 不同 embedding 配置自动使用独立目录，切换配置无需重建索引！
+# 例如：
+#   local_bge-base-zh-v1.5 → data/vectordb/chroma/local_bge-base-zh-v1.5/
+#   remote_text-embedding-3-small → data/vectordb/chroma/remote_text-embedding-3-small/
+# 优势：快速切换配置对比效果，数据互不影响
+
 # 文档目录路径（支持 TXT、MD、PDF 格式）
-RAG_DOCUMENTS_PATH=data/documents
+# 文档存储路径（支持多个路径，用逗号分隔）⭐
+# 普通文档放在 ./data/documents
+# Git 仓库项目放在 ./data/projects（自动忽略 .git, node_modules 等）
+RAG_DOCUMENTS_PATH=data/documents,data/projects
 # 向量数据库路径
 RAG_CHROMA_PATH=data/chroma
 # 是否在启动时重建索引
@@ -158,7 +192,9 @@ LANGFUSE_SAMPLE_RATE=1.0  # 采样率 0.0-1.0
 
 > 💡 **工具调用**：启用后Agent可以自动调用10个内置工具（日期、搜索、天气、计算器、知识库等）。详见 [docs/guides/tool-calling.md](docs/guides/tool-calling.md)
 > 
-> 💡 **RAG 知识库**：启用后Agent可自动查询内部文档（TXT/MD/PDF）。将文档放入 `data/documents/` 即可。详见 [docs/guides/rag-tool-integration.md](docs/guides/rag-tool-integration.md)
+> 💡 **RAG 知识库**：启用后Agent可自动查询内部文档（TXT/MD/PDF）和代码文件（⭐ 支持 30+ 种语言）。普通文档放 `data/documents/`，Git 仓库放 `data/projects/`（自动忽略 .git, node_modules 等）。详见 [docs/guides/rag-tool-integration.md](docs/guides/rag-tool-integration.md)
+>
+> 💡 **本地 Embedding**：⭐ 新功能！使用本地模型向量化，完全免费，无需 API 调用。首次使用自动下载模型（约 400MB）。详见 [docs/guides/local-embedding.md](docs/guides/local-embedding.md)
 > 
 > 💡 **上下文压缩**：长对话会导致token超限和成本暴涨。推荐使用 `sliding_window` 策略。详见 [docs/guides/compression.md](docs/guides/compression.md)
 >
@@ -468,7 +504,7 @@ curl "http://localhost:8000/stats/tokens/user_123"
   "total_cost_usd": 0.001521,
   "by_model": [
     {
-      "model_name": "gpt-4o-mini",
+      "model_name": "glm-4.5-air",
       "request_count": 15,
       "prompt_tokens": 3250,
       "completion_tokens": 1820,
@@ -642,6 +678,7 @@ POST /chat
 ### Tool Calling（工具调用）⭐
 - [工具调用完整文档](docs/guides/tool-calling.md) - **推荐阅读**，工具系统详解、使用示例、自定义工具
 - [工具调用快速入门](docs/guides/tool-calling-intro.md) - 快速上手工具调用
+- [任务规划模块](docs/guides/task-planner.md) - Plan-and-Execute 模式配置与日志说明
 
 ### 监控与统计 ⭐
 - [Langfuse问题排查](docs/troubleshooting/langfuse-issues.md) - Langfuse集成的已知问题和解决方案
