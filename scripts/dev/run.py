@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 # 添加项目根目录到路径
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 
 def main():
@@ -90,11 +90,20 @@ def main():
     print(f"   热重载: {'启用' if (args.reload and not args.no_reload) else '禁用'}")
     print(f"\n按 Ctrl+C 停止服务\n")
 
+    # 配置热重载排除目录（防止 data/vectordb 等数据目录触发重载）
+    # 使用目录路径而非 glob 模式
+    reload_excludes = [
+        "data",
+        "vectordb", 
+        "checkpoints",
+    ] if (args.reload and not args.no_reload) else None
+
     uvicorn.run(
         "app.main:app",
         host=args.host,
         port=args.port,
-        reload=args.reload and not args.no_reload
+        reload=args.reload and not args.no_reload,
+        reload_excludes=reload_excludes
     )
 
 
