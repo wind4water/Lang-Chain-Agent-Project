@@ -1,6 +1,6 @@
 """
 多模型 + ES 混合检索器 - RRF 三路融合版本
-支持 BGE、CodeBERT、ES 三路并行检索，使用 RRF 算法融合结果
+支持 BGE、代码模型(UniXcoder/CodeBERT)、ES 三路并行检索，使用 RRF 算法融合结果
 """
 from typing import List, Optional, Any, Dict
 from collections import defaultdict
@@ -18,17 +18,30 @@ class MultiModelHybridRetriever(BaseRetriever):
     多模型 Hybrid 检索器 - RRF 三路融合
     
     三路并行召回：
-    1. BGE 向量检索（文档类）
-    2. CodeBERT 向量检索（代码类）
+    1. 文档向量检索器（BGE等文档类模型）
+    2. 代码向量检索器（UniXcoder/CodeBERT等代码模型）
     3. ES 关键词检索
     
     使用 RRF (Reciprocal Rank Fusion) 算法融合，无需分数归一化
     """
     
     # 三路检索器配置
-    bge_retriever: Optional[Any] = Field(None, description="BGE向量检索器")
-    codebert_retriever: Optional[Any] = Field(None, description="CodeBERT向量检索器")
+    doc_retriever: Optional[Any] = Field(None, description="文档向量检索器(BGE等)")
+    code_retriever: Optional[Any] = Field(None, description="代码向量检索器(UniXcoder/CodeBERT等)")
     es_retriever: Optional[Any] = Field(None, description="ES关键词检索器")
+    
+    # 向后兼容的旧字段名
+    bge_retriever: Optional[Any] = Field(None, description="[兼容]BGE向量检索器，映射到doc_retriever")
+    codebert_retriever: Optional[Any] = Field(None, description="[兼容]CodeBERT向量检索器，映射到code_retriever")
+    
+    def __init__(self, **data):
+        """初始化，处理向后兼容的字段名"""
+        # 处理旧字段名映射
+        if 'bge_retriever' in data and data['bge_retriever'] is not None:
+            data['doc_retriever'] = data.pop('bge_retriever')
+        if 'codebert_retriever' in data and data['codebert_retriever'] is not None:
+            data['code_retriever'] = data.pop('codebert_retriever')
+        super().__init__(**data)
     
     # RRF 参数
     rrf_k: int = Field(60, description="RRF 算法中的常数k，Google推荐60")
@@ -85,36 +98,36 @@ class MultiModelHybridRetriever(BaseRetriever):
             except Exception as e:
                 raise e
         
-        # BGE 检索
-        if self.bge_retriever:
+        # 文档检索器 (BGE)
+        if self.doc_retriever:
             try:
-                bge_results = _invoke_retriever(self.bge_retriever, query)
-                results_by_source['bge'] = bge_results[:self.per_retriever_k]
-                logger.info(f"  BGE 检索: {len(results_by_source['bge'])} 条")
+                doc_results = _invoke_retriever(self.doc_retriever, query)
+                results_by_source['doc'] = doc_results[:self.per_retriever_k]
+                logger.info(f"  文档检索器: {len(results_by_source['doc'])} 条")
             except Exception as e:
-                logger.warning(f"BGE 检索失败: {e}")
-                results_by_source['bge'] = []
+                logger.warning(f"文档检索失败: {e}")
+                results_by_source['doc'] = []
         else:
-            results_by_source['bge'] = []
+            results_by_source['doc'] = []
         
-        # CodeBERT 检索
-        if self.codebert_retriever:
+        # 代码检索器 (UniXcoder/CodeBERT)
+        if self.code_retriever:
             try:
-                codebert_results = _invoke_retriever(self.codebert_retriever, query)
-                results_by_source['codebert'] = codebert_results[:self.per_retriever_k]
-                logger.info(f"  CodeBERT 检索: {len(results_by_source['codebert'])} 条")
+                code_results = _invoke_retriever(self.code_retriever, query)
+                results_by_source['code'] = code_results[:self.per_retriever_k]
+                logger.info(f"  代码检索器: {len(results_by_source['code'])} 条")
             except Exception as e:
-                logger.warning(f"CodeBERT 检索失败: {e}")
-                results_by_source['codebert'] = []
+                logger.warning(f"代码检索失败: {e}")
+                results_by_source['code'] = []
         else:
-            results_by_source['codebert'] = []
+            results_by_source['code'] = []
         
         # ES 检索
         if self.es_retriever:
             try:
                 es_results = _invoke_retriever(self.es_retriever, query)
                 results_by_source['es'] = es_results[:self.per_retriever_k]
-                logger.info(f"  ES 检索: {len(results_by_source['es'])} 条")
+                logger.info(f"  ES检索: {len(results_by_source['es'])} 条")
             except Exception as e:
                 logger.warning(f"ES 检索失败: {e}")
                 results_by_source['es'] = []
@@ -197,7 +210,7 @@ class MultiModelHybridRetriever(BaseRetriever):
             # 解析来源：哪些模型/ES，各自排名
             source_details = []
             for src in sources:
-                # src 格式: "bge#3" 或 "es#1"
+                # src 格式: "doc#3" 或 "es#1"
                 if '#' in src:
                     src_name, rank = src.split('#')
                     source_details.append(f"{src_name}(#{rank})")
@@ -226,15 +239,15 @@ class MultiModelHybridRetriever(BaseRetriever):
         # 1. 三路并发检索
         tasks = []
         
-        if self.bge_retriever:
-            tasks.append(self._async_retrieve('bge', self.bge_retriever, query))
+        if self.doc_retriever:
+            tasks.append(self._async_retrieve('doc', self.doc_retriever, query))
         else:
-            tasks.append(asyncio.sleep(0, result=('bge', [])))
+            tasks.append(asyncio.sleep(0, result=('doc', [])))
             
-        if self.codebert_retriever:
-            tasks.append(self._async_retrieve('codebert', self.codebert_retriever, query))
+        if self.code_retriever:
+            tasks.append(self._async_retrieve('code', self.code_retriever, query))
         else:
-            tasks.append(asyncio.sleep(0, result=('codebert', [])))
+            tasks.append(asyncio.sleep(0, result=('code', [])))
             
         if self.es_retriever:
             tasks.append(self._async_retrieve('es', self.es_retriever, query))
@@ -246,8 +259,8 @@ class MultiModelHybridRetriever(BaseRetriever):
         
         # 收集结果
         results_by_source: Dict[str, List[Document]] = {
-            'bge': [],
-            'codebert': [],
+            'doc': [],
+            'code': [],
             'es': []
         }
         
@@ -257,7 +270,12 @@ class MultiModelHybridRetriever(BaseRetriever):
                 continue
             source_name, docs = result
             results_by_source[source_name] = docs[:self.per_retriever_k]
-            logger.info(f"  {source_name} 检索: {len(results_by_source[source_name])} 条")
+            if source_name == 'doc':
+                logger.info(f"  文档检索器: {len(results_by_source[source_name])} 条")
+            elif source_name == 'code':
+                logger.info(f"  代码检索器: {len(results_by_source[source_name])} 条")
+            else:
+                logger.info(f"  {source_name}检索: {len(results_by_source[source_name])} 条")
         
         # 2. RRF 融合
         final_results = self._rrf_fusion(results_by_source)
@@ -297,8 +315,8 @@ class MultiModelHybridRetriever(BaseRetriever):
             "k": self.k,
             "per_retriever_k": self.per_retriever_k,
             "retrievers": {
-                "bge": self.bge_retriever is not None,
-                "codebert": self.codebert_retriever is not None,
+                "doc": self.doc_retriever is not None,
+                "code": self.code_retriever is not None,
                 "es": self.es_retriever is not None
             }
         }

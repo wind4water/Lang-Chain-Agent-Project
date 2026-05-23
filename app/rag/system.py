@@ -93,12 +93,12 @@ class RAGSystem:
                 
                 # 根据模型类型分配
                 if model_config:
-                    if model_config.model_type == "bge":
+                    if model_config.model_type in ("bge", "doc"):
                         bge_retriever = retriever
                         logger.info(f"  BGE 检索器: {model_config.model_name}")
-                    elif model_config.model_type == "codebert":
+                    elif model_config.model_type in ("codebert", "unixcoder", "code"):
                         codebert_retriever = retriever
-                        logger.info(f"  CodeBERT 检索器: {model_config.model_name}")
+                        logger.info(f"  代码检索器: {model_config.model_name} ({model_config.model_type})")
                 else:
                     # 从 key 推断
                     if "bge" in model_key.lower():
@@ -108,13 +108,13 @@ class RAGSystem:
                         codebert_retriever = retriever
                         logger.info(f"  CodeBERT 检索器 (推断): {model_key}")
             
-            # Hybrid 模式：三路 RRF 融合 (BGE + CodeBERT + ES)
+            # Hybrid 模式：三路 RRF 融合 (文档模型 + 代码模型 + ES)
             if retrieval_mode == "hybrid":
                 from app.rag.core.multi_model_hybrid_retriever import MultiModelHybridRetriever
-                logger.info("使用 RRF 三路融合检索器 (BGE + CodeBERT + ES)")
+                logger.info("使用 RRF 三路融合检索器 (文档模型 + 代码模型 + ES)")
                 return MultiModelHybridRetriever(
-                    bge_retriever=bge_retriever,
-                    codebert_retriever=codebert_retriever,
+                    doc_retriever=bge_retriever,
+                    code_retriever=codebert_retriever,
                     es_retriever=self.es_keyword_retriever,
                     rrf_k=60,  # RRF 常数，Google 推荐值
                     k=self.config.top_k,

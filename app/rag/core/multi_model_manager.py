@@ -12,6 +12,7 @@ import os
 from app.rag.config import rag_config
 from app.rag.core.multi_model_config import MultiModelConfig, PathModelConfig
 from app.rag.core.embeddings import EmbeddingManager
+from app.rag.core.code_embeddings import get_code_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,19 @@ class MultiModelManager:
                 manager = EmbeddingManager(
                     model_name=model_config.model_name,
                     embedding_type="local",
+                    device=self.config.embedding_device
+                )
+            elif model_config.model_type == "unixcoder":
+                # UniXcoder 使用专门的代码嵌入封装
+                logger.info(f"   使用 UniXcoder 专用代码嵌入模型")
+                manager = EmbeddingManager(
+                    model_name=model_config.model_name,
+                    embedding_type="local",
+                    device=self.config.embedding_device
+                )
+                # 替换内部的 embeddings 为 UniXcoder 实现
+                manager._embeddings = get_code_embeddings(
+                    model_name=model_config.model_name,
                     device=self.config.embedding_device
                 )
             elif model_config.model_type == "openai":

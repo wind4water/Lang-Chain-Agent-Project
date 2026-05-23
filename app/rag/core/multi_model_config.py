@@ -21,12 +21,16 @@ class PathModelConfig:
 
     def matches(self, file_path: str) -> bool:
         """检查文件路径是否匹配此配置"""
+        # 标准化路径：移除 ./ 前缀，统一使用相对路径格式
+        normalized_path = file_path.lstrip("./")
+        normalized_self_path = self.path.lstrip("./")
+        
         # 支持完整路径匹配或包含关键词匹配
-        if self.path in file_path:
+        if normalized_self_path in normalized_path:
             return True
         # 支持通配符匹配（简单实现）
         import fnmatch
-        if fnmatch.fnmatch(file_path, self.path):
+        if fnmatch.fnmatch(normalized_path, normalized_self_path):
             return True
         return False
 
@@ -132,10 +136,10 @@ DEFAULT_MULTI_MODEL_CONFIG = """
     },
     {
         "path": "./data/projects",
-        "model_type": "codebert",
-        "model_name": "microsoft/codebert-base",
+        "model_type": "unixcoder",
+        "model_name": "microsoft/unixcoder-base",
         "dimension": 768,
-        "description": "代码项目，使用 CodeBERT 模型"
+        "description": "代码项目，使用 UniXcoder 模型（专为代码检索优化）"
     },
     {
         "path": "./data/projects/*.md",

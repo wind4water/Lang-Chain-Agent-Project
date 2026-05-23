@@ -37,6 +37,7 @@ elasticsearch>=8.14.0         # ES 关键词召回（可选）
 langchain-huggingface>=0.1.0  # HuggingFace Embeddings 集成
 sentence-transformers>=2.2.0  # 本地向量化模型
 torch>=2.0.0                  # PyTorch（sentence-transformers 依赖）
+transformers>=4.30.0          # HuggingFace Transformers（UniXcoder 依赖）
 
 # 飞书机器人（可选）- WebSocket 长连接模式
 lark-oapi>=1.5.0
