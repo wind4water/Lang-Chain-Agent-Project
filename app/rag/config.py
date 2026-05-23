@@ -78,6 +78,20 @@ class RAGConfig(BaseModel):
         default_factory=lambda: os.getenv("ES_ENABLED", "false").lower() == "true",
         description="是否启用 Elasticsearch 关键词召回"
     )
+
+    # 多模型配置
+    multi_model_config: str = Field(
+        default_factory=lambda: os.getenv("MULTI_MODEL_CONFIG", ""),
+        description="多模型配置（JSON格式）"
+    )
+    doc_model_weight: float = Field(
+        default_factory=lambda: float(os.getenv("DOC_MODEL_WEIGHT", "0.5")),
+        description="文档模型检索权重"
+    )
+    code_model_weight: float = Field(
+        default_factory=lambda: float(os.getenv("CODE_MODEL_WEIGHT", "0.5")),
+        description="代码模型检索权重"
+    )
     es_hosts: str = Field(
         default_factory=lambda: os.getenv("ES_HOSTS", "http://127.0.0.1:9200"),
         description="ES 地址，多个地址用逗号分隔"
@@ -106,6 +120,34 @@ class RAGConfig(BaseModel):
         default_factory=lambda: int(os.getenv("ES_REQUEST_TIMEOUT", "30")),
         description="ES 请求超时时间（秒）"
     )
+
+    # HNSW 配置
+    hnsw_space: str = Field(
+        default_factory=lambda: os.getenv("HNSW_SPACE", "l2"),
+        description="HNSW 距离度量: cosine, l2, ip"
+    )
+    hnsw_m: int = Field(
+        default_factory=lambda: int(os.getenv("HNSW_M", "16")),
+        description="HNSW 最大连接数"
+    )
+    hnsw_ef_search: int = Field(
+        default_factory=lambda: int(os.getenv("HNSW_EF_SEARCH", "100")),
+        description="HNSW 搜索候选列表大小"
+    )
+
+    def get_collection_metadata(self) -> dict:
+        """
+        获取 HNSW collection 配置元数据
+        
+        Returns:
+            ChromaDB collection 创建时的 metadata
+        """
+        return {
+            "hnsw:space": self.hnsw_space,
+            "hnsw:construction_ef": 200,
+            "hnsw:search_ef": self.hnsw_ef_search,
+            "hnsw:M": self.hnsw_m,
+        }
 
     # 文本分割配置
     chunk_size: int = Field(

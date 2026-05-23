@@ -58,14 +58,19 @@ class VectorStoreManager:
                 f"向量库目录无写权限: {os.path.abspath(self.persist_directory)}"
             )
 
-    def _new_vectorstore_instance(self) -> Chroma:
-        """创建新的 Chroma 实例。"""
+    def _new_vectorstore_instance(self, collection_metadata: Optional[dict] = None) -> Chroma:
+        """创建新的 Chroma 实例。
+        
+        Args:
+            collection_metadata: 创建 collection 时的元数据（HNSW 配置）
+        """
         self._ensure_persist_directory_writable()
         return Chroma(
             collection_name=self.collection_name,
             embedding_function=self.embeddings,
             persist_directory=self.persist_directory,
             client_settings=Settings(anonymized_telemetry=False),
+            collection_metadata=collection_metadata,
         )
 
     @property
@@ -73,7 +78,17 @@ class VectorStoreManager:
         """获取向量存储实例（懒加载）"""
         if self._vectorstore is None:
             logger.info(f"加载向量存储: {self.collection_name}")
-            self._vectorstore = self._new_vectorstore_instance()
+            # 尝试从 rag_config 获取 HNSW 配置
+            try:
+                from app.rag.config import rag_config
+                collection_metadata = rag_config.get_collection_metadata()
+                logger.info(f"使用 HNSW 配置: space={collection_metadata.get('hnsw:space')}, "
+                          f"M={collection_metadata.get('hnsw:M')}, "
+                          f"ef_search={collection_metadata.get('hnsw:search_ef')}")
+            except Exception as e:
+                logger.warning(f"获取 HNSW 配置失败，使用默认: {e}")
+                collection_metadata = None
+            self._vectorstore = self._new_vectorstore_instance(collection_metadata)
         return self._vectorstore
 
     def add_documents(self, documents: List[Document]) -> List[str]:
