@@ -799,12 +799,16 @@ class RAGSystem:
             
             if any(k in q_lower for k in person_keywords):
                 doc_group = "documents"
-                logger.info(f"🧭 RAG 智能路由: 检测到员工/人相关的关键词，自动收窄检索范围至 doc_group='documents'")
-                print(f"🧭 [RAG Router] 智能路由：检测到人物/人事相关意图，自动收窄检索范围至 doc_group='documents'")
+                logger.info(
+                    "[RAG Router] Smart routing detected person-related intent, "
+                    "narrowing search scope to doc_group='documents'"
+                )
             elif any(k in q_lower for k in code_keywords):
                 doc_group = "projects"
-                logger.info(f"🧭 RAG 智能路由: 检测到代码/技术相关的关键词，自动收窄检索范围至 doc_group='projects'")
-                print(f"🧭 [RAG Router] 智能路由：检测到技术/代码相关意图，自动收窄检索范围至 doc_group='projects'")
+                logger.info(
+                    "[RAG Router] Smart routing detected code/technical intent, "
+                    "narrowing search scope to doc_group='projects'"
+                )
 
         # 2. 如果存在 doc_group 约束，合并入 metadata_filter
         if doc_group:

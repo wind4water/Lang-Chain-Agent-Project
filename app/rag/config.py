@@ -9,6 +9,16 @@ from pydantic import BaseModel, Field
 class RAGConfig(BaseModel):
     """RAG 配置"""
 
+    # 日志配置
+    rag_log_level: str = Field(
+        default_factory=lambda: os.getenv("RAG_LOG_LEVEL", "INFO"),
+        description="RAG 日志级别: DEBUG, INFO, WARNING, ERROR"
+    )
+    rag_verbose: bool = Field(
+        default_factory=lambda: os.getenv("RAG_VERBOSE", "false").lower() == "true",
+        description="是否启用详细日志"
+    )
+    
     # 嵌入模型配置
     embedding_type: str = Field(
         default_factory=lambda: os.getenv("EMBEDDING_TYPE", "local"),

@@ -12,6 +12,7 @@
 - ✅ **异步处理**: 全异步架构，高性能
 - ⭐ **Tool Calling**: Agent自动判断并调用工具完成任务（日期、搜索、天气、计算器、知识库等10个内置工具）
 - ⭐ **RAG知识库**: 支持文档检索增强生成，Agent可自动查询内部知识库（TXT/MD/PDF格式）
+- ⭐ **多模型RAG**: 支持不同嵌入模型（BGE文档/UniXcoder代码），自动路由到最优模型
 - ⭐ **本地Embedding**: 支持本地向量化模型，完全免费，无需API调用（推荐使用 bge-base-zh-v1.5）
 - ⭐ **上下文压缩**: 支持3种压缩策略（滑动窗口、Token计数、智能摘要），防止token超限
 - ⭐ **流式响应**: 支持SSE流式输出，实时显示AI回复
@@ -192,7 +193,7 @@ LANGFUSE_SAMPLE_RATE=1.0  # 采样率 0.0-1.0
 
 > 💡 **工具调用**：启用后Agent可以自动调用10个内置工具（日期、搜索、天气、计算器、知识库等）。详见 [docs/guides/tool-calling.md](docs/guides/tool-calling.md)
 > 
-> 💡 **RAG 知识库**：启用后Agent可自动查询内部文档（TXT/MD/PDF）和代码文件（⭐ 支持 30+ 种语言）。普通文档放 `data/documents/`，Git 仓库放 `data/projects/`（自动忽略 .git, node_modules 等）。详见 [docs/guides/rag-tool-integration.md](docs/guides/rag-tool-integration.md)
+> 💡 **RAG 知识库**：启用后Agent可自动查询内部文档（TXT/MD/PDF）和代码文件（⭐ 支持 30+ 种语言）。普通文档放 `data/documents/`，Git 仓库放 `data/projects/`（自动忽略 .git, node_modules 等）。支持多模型：BGE处理文档，UniXcoder处理代码。详见 [docs/guides/rag-tool-integration.md](docs/guides/rag-tool-integration.md) 和 [app/rag/README.md](app/rag/README.md)
 >
 > 💡 **本地 Embedding**：⭐ 新功能！使用本地模型向量化，完全免费，无需 API 调用。首次使用自动下载模型（约 400MB）。详见 [docs/guides/local-embedding.md](docs/guides/local-embedding.md)
 > 
