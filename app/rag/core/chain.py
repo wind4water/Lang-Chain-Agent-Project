@@ -634,21 +634,48 @@ class RAGChain:
                         answer = retry_answer
                         logger.info("RAG 同步拒答兜底重试成功: docs=%s", len(docs))
 
-            # Step 5: 提取来源信息（按文件去重，每个文件只保留第一个匹配块）
+            # Step 5: 提取来源信息（增强版：包含 RRF 来源信息）
             sources = []
             seen_files = set()
-            for doc in docs:
+            for i, doc in enumerate(docs):
                 filename = doc.metadata.get("filename", "未知")
                 source = doc.metadata.get("source", "未知")
-
-                # 使用 source（完整路径）作为去重键
+                
+                # 获取 RRF 相关信息
+                rrf_score = doc.metadata.get("_rrf_score", 0)
+                rrf_sources = doc.metadata.get("_sources", [])
+                
                 if source not in seen_files:
                     seen_files.add(source)
-                    sources.append({
+                    source_info = {
+                        "index": i + 1,
                         "filename": filename,
                         "source": source,
-                        "content_preview": doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content
-                    })
+                        "content_preview": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content,
+                        "rrf_score": round(rrf_score, 4),
+                        "rrf_sources": rrf_sources  # 如: ['bge#1', 'es#3']
+                    }
+                    sources.append(source_info)
+                    
+                    # 打印详细日志
+                    logger.info(f"  来源-{i+1}: {filename}")
+                    logger.info(f"    RRF分数: {rrf_score:.4f}")
+                    logger.info(f"    检索来源: {rrf_sources}")
+                    logger.info(f"    文件路径: {source}")
+            
+            # 汇总统计
+            source_type_count = {"bge": 0, "codebert": 0, "es": 0}
+            for s in sources:
+                for src in s.get("rrf_sources", []):
+                    src_type = src.split("#")[0] if "#" in src else src
+                    if src_type in source_type_count:
+                        source_type_count[src_type] += 1
+            
+            logger.info(f"📊 来源统计:")
+            logger.info(f"  总来源数: {len(sources)}")
+            logger.info(f"  BGE来源: {source_type_count['bge']} 个")
+            logger.info(f"  CodeBERT来源: {source_type_count['codebert']} 个")
+            logger.info(f"  ES来源: {source_type_count['es']} 个")
 
             result = {
                 "answer": answer,
@@ -697,20 +724,48 @@ class RAGChain:
                         answer = retry_answer
                         logger.info("RAG 异步拒答兜底重试成功: docs=%s", len(docs))
 
-            # Step 4: 提取来源信息
+            # Step 4: 提取来源信息（增强版：包含 RRF 来源信息）
             sources = []
             seen_files = set()
-            for doc in docs:
+            for i, doc in enumerate(docs):
                 filename = doc.metadata.get("filename", "未知")
                 source = doc.metadata.get("source", "未知")
-
+                
+                # 获取 RRF 相关信息
+                rrf_score = doc.metadata.get("_rrf_score", 0)
+                rrf_sources = doc.metadata.get("_sources", [])
+                
                 if source not in seen_files:
                     seen_files.add(source)
-                    sources.append({
+                    source_info = {
+                        "index": i + 1,
                         "filename": filename,
                         "source": source,
-                        "content_preview": doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content
-                    })
+                        "content_preview": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content,
+                        "rrf_score": round(rrf_score, 4),
+                        "rrf_sources": rrf_sources  # 如: ['bge#1', 'es#3']
+                    }
+                    sources.append(source_info)
+                    
+                    # 打印详细日志
+                    logger.info(f"  来源-{i+1}: {filename}")
+                    logger.info(f"    RRF分数: {rrf_score:.4f}")
+                    logger.info(f"    检索来源: {rrf_sources}")
+                    logger.info(f"    文件路径: {source}")
+            
+            # 汇总统计
+            source_type_count = {"bge": 0, "codebert": 0, "es": 0}
+            for s in sources:
+                for src in s.get("rrf_sources", []):
+                    src_type = src.split("#")[0] if "#" in src else src
+                    if src_type in source_type_count:
+                        source_type_count[src_type] += 1
+            
+            logger.info(f"📊 来源统计:")
+            logger.info(f"  总来源数: {len(sources)}")
+            logger.info(f"  BGE来源: {source_type_count['bge']} 个")
+            logger.info(f"  CodeBERT来源: {source_type_count['codebert']} 个")
+            logger.info(f"  ES来源: {source_type_count['es']} 个")
 
             result = {
                 "answer": answer,

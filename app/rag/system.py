@@ -73,18 +73,65 @@ class RAGSystem:
         # 多模型模式：创建多路检索器
         if multi_model_manager.multi_model_config and len(self.model_vectorstores) > 1:
             logger.info("使用多模型检索器...")
+            
+            # 获取各模型的向量存储
+            bge_retriever = None
+            codebert_retriever = None
+            
+            for model_key, model_vs in self.model_vectorstores.items():
+                model_config = multi_model_manager.multi_model_config.get_unique_models().get(
+                    model_key.replace("bge_", "").replace("codebert_", "").replace("_", "/", 1)
+                )
+                
+                # 创建检索器
+                retriever = model_vs.get_retriever(
+                    search_type=self.config.search_type,
+                    k=self.config.top_k * 4,  # 每路多取一些，给 RRF 更充分的选择
+                    score_threshold=self.config.score_threshold,
+                    metadata_filter=metadata_filter
+                )
+                
+                # 根据模型类型分配
+                if model_config:
+                    if model_config.model_type == "bge":
+                        bge_retriever = retriever
+                        logger.info(f"  BGE 检索器: {model_config.model_name}")
+                    elif model_config.model_type == "codebert":
+                        codebert_retriever = retriever
+                        logger.info(f"  CodeBERT 检索器: {model_config.model_name}")
+                else:
+                    # 从 key 推断
+                    if "bge" in model_key.lower():
+                        bge_retriever = retriever
+                        logger.info(f"  BGE 检索器 (推断): {model_key}")
+                    else:
+                        codebert_retriever = retriever
+                        logger.info(f"  CodeBERT 检索器 (推断): {model_key}")
+            
+            # Hybrid 模式：三路 RRF 融合 (BGE + CodeBERT + ES)
+            if retrieval_mode == "hybrid":
+                from app.rag.core.multi_model_hybrid_retriever import MultiModelHybridRetriever
+                logger.info("使用 RRF 三路融合检索器 (BGE + CodeBERT + ES)")
+                return MultiModelHybridRetriever(
+                    bge_retriever=bge_retriever,
+                    codebert_retriever=codebert_retriever,
+                    es_retriever=self.es_keyword_retriever,
+                    rrf_k=60,  # RRF 常数，Google 推荐值
+                    k=self.config.top_k,
+                    per_retriever_k=self.config.top_k * 4  # 每路取更多，RRF 后取 top_k
+                )
+            
+            # 非 hybrid 模式：使用原有的 MultiModelRetriever (BGE + CodeBERT 内部融合)
             from app.rag.core.multi_model_retriever import MultiModelRetriever
             
             retrievers = []
             total_weight = 0
             
-            # 为每个模型创建检索器
             for model_key, model_vs in self.model_vectorstores.items():
                 model_config = multi_model_manager.multi_model_config.get_unique_models().get(
                     model_key.replace("bge_", "").replace("codebert_", "").replace("_", "/", 1)
                 )
                 if model_config is None:
-                    # 从 key 推断
                     if "bge" in model_key.lower():
                         weight = self.config.doc_model_weight
                     else:
@@ -110,24 +157,10 @@ class RAGSystem:
             for r in retrievers:
                 r["weight"] = r["weight"] / total_weight if total_weight > 0 else 1.0 / len(retrievers)
             
-            multi_retriever = MultiModelRetriever(
+            return MultiModelRetriever(
                 retrievers=retrievers,
                 k=self.config.top_k
             )
-            
-            # Hybrid 模式：多模型 + ES 融合
-            if retrieval_mode == "hybrid":
-                from app.rag.core.multi_model_hybrid_retriever import MultiModelHybridRetriever
-                logger.info("使用多模型 Hybrid 检索器（向量+ES）")
-                return MultiModelHybridRetriever(
-                    multi_retriever=multi_retriever,
-                    keyword_retriever=self.es_keyword_retriever,
-                    vector_weight=0.7,
-                    keyword_weight=0.3,
-                    k=self.config.top_k
-                )
-            
-            return multi_retriever
         
         # 单模型模式：使用原有逻辑
         if retrieval_mode == "hybrid":

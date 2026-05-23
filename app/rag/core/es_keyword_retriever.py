@@ -311,3 +311,17 @@ class ESKeywordRetriever:
         self.clear()
         return self.index_documents(documents)
 
+    def get_relevant_documents(self, query: str) -> List[Document]:
+        """
+        LangChain BaseRetriever 兼容接口
+        调用 search 方法进行关键词召回
+        """
+        return self.search(query, k=10)
+
+    async def aget_relevant_documents(self, query: str) -> List[Document]:
+        """
+        LangChain BaseRetriever 兼容接口（异步版本）
+        """
+        import asyncio
+        return await asyncio.to_thread(self.get_relevant_documents, query)
+
