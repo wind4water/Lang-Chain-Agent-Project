@@ -14,6 +14,9 @@ import stat
 
 logger = logging.getLogger(__name__)
 
+# 全局 Chroma 客户端缓存，避免重复创建
+_chroma_client_cache = {}
+
 
 class VectorStoreManager:
     """向量存储管理器（Chroma）"""
@@ -58,6 +61,27 @@ class VectorStoreManager:
                 f"向量库目录无写权限: {os.path.abspath(self.persist_directory)}"
             )
 
+    def _get_or_create_chroma_client(self):
+        """获取或创建 Chroma 客户端（全局单例，避免重复创建）"""
+        global _chroma_client_cache
+        
+        cache_key = os.path.abspath(self.persist_directory)
+        
+        if cache_key not in _chroma_client_cache:
+            import chromadb
+            logger.info(f"创建新的 Chroma 客户端: {cache_key}")
+            _chroma_client_cache[cache_key] = chromadb.PersistentClient(
+                path=self.persist_directory,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    is_persistent=True
+                )
+            )
+        else:
+            logger.info(f"复用已存在的 Chroma 客户端: {cache_key}")
+        
+        return _chroma_client_cache[cache_key]
+
     def _new_vectorstore_instance(self, collection_metadata: Optional[dict] = None) -> Chroma:
         """创建新的 Chroma 实例。
         
@@ -65,11 +89,28 @@ class VectorStoreManager:
             collection_metadata: 创建 collection 时的元数据（HNSW 配置）
         """
         self._ensure_persist_directory_writable()
+        
+        # 使用全局缓存的客户端，避免重复创建
+        client = self._get_or_create_chroma_client()
+        
+        try:
+            # 尝试获取已存在的 collection
+            existing_collection = client.get_collection(self.collection_name)
+            logger.info(f"Collection '{self.collection_name}' 已存在，使用现有配置")
+            collection_exists = True
+        except Exception:
+            collection_exists = False
+            logger.info(f"Collection '{self.collection_name}' 不存在，将创建新 collection")
+        
+        # 如果 collection 已存在，不传 metadata（避免冲突）
+        if collection_exists:
+            collection_metadata = None
+        
+        # 显式传递 client，避免内部创建 EphemeralClient
         return Chroma(
+            client=client,  # 关键：传入已创建的 PersistentClient
             collection_name=self.collection_name,
             embedding_function=self.embeddings,
-            persist_directory=self.persist_directory,
-            client_settings=Settings(anonymized_telemetry=False),
             collection_metadata=collection_metadata,
         )
 

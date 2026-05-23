@@ -1,10 +1,8 @@
 """
-RAG 系统管理器 - 多模型版本
-支持路径级别的模型配置
+RAG 系统管理器
 """
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 from langchain_openai import ChatOpenAI
-from langchain_core.documents import Document
 import os
 import logging
 
@@ -15,7 +13,6 @@ from app.rag.core.hybrid_retriever import HybridRetriever
 from app.rag.core.es_keyword_retriever import ESKeywordRetriever
 from app.rag.core.chain import RAGChain
 from app.rag.core.document_registry import DocumentRegistry
-from app.rag.core.multi_model_manager import multi_model_manager
 from app.rag.loaders.document_loader import DocumentLoader
 from app.rag.processors.splitter import TextSplitter
 
@@ -23,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class RAGSystem:
-    """RAG 系统管理器 - 支持多模型"""
+    """RAG 系统管理器"""
 
     def __init__(self):
         """初始化 RAG 系统"""
@@ -35,18 +32,10 @@ class RAGSystem:
         self.llm: Optional[ChatOpenAI] = None
         self.document_registry: Optional[DocumentRegistry] = None
         self.es_keyword_retriever: Optional[ESKeywordRetriever] = None
-        
-        # 多模型支持
-        self.multi_model_config: Optional[MultiModelConfig] = None
-        self.model_managers: Dict[str, EmbeddingManager] = {}  # model_name -> EmbeddingManager
-        self.model_vectorstores: Dict[str, VectorStoreManager] = {}  # model_name -> VectorStoreManager
-        self._is_multi_model = bool(rag_config.multi_model_config)
 
         self._initialized = False
 
         logger.info("RAG 系统管理器已创建")
-        if self._is_multi_model:
-            logger.info("多模型模式已启用")
 
     def _rebuild_rag_chain(self):
         """基于当前向量库状态重建检索器与 RAG Chain。"""
@@ -67,69 +56,8 @@ class RAGSystem:
         )
 
     def _build_retriever(self, metadata_filter: Optional[Dict[str, Any]] = None):
-        """按当前配置构建检索器（支持多模型）。"""
+        """按当前配置构建检索器。"""
         retrieval_mode = (self.config.retrieval_mode or "vector").lower()
-        
-        # 多模型模式：创建多路检索器
-        if multi_model_manager.multi_model_config and len(self.model_vectorstores) > 1:
-            logger.info("使用多模型检索器...")
-            from app.rag.core.multi_model_retriever import MultiModelRetriever
-            
-            retrievers = []
-            total_weight = 0
-            
-            # 为每个模型创建检索器
-            for model_key, model_vs in self.model_vectorstores.items():
-                model_config = multi_model_manager.multi_model_config.get_unique_models().get(
-                    model_key.replace("bge_", "").replace("codebert_", "").replace("_", "/", 1)
-                )
-                if model_config is None:
-                    # 从 key 推断
-                    if "bge" in model_key.lower():
-                        weight = self.config.doc_model_weight
-                    else:
-                        weight = self.config.code_model_weight
-                else:
-                    weight = self.config.doc_model_weight if model_config.model_type == "bge" else self.config.code_model_weight
-                
-                retriever = model_vs.get_retriever(
-                    search_type=self.config.search_type,
-                    k=self.config.top_k,
-                    score_threshold=self.config.score_threshold,
-                    metadata_filter=metadata_filter
-                )
-                
-                retrievers.append({
-                    "retriever": retriever,
-                    "model_config": model_config,
-                    "weight": weight
-                })
-                total_weight += weight
-            
-            # 归一化权重
-            for r in retrievers:
-                r["weight"] = r["weight"] / total_weight if total_weight > 0 else 1.0 / len(retrievers)
-            
-            multi_retriever = MultiModelRetriever(
-                retrievers=retrievers,
-                k=self.config.top_k
-            )
-            
-            # Hybrid 模式：多模型 + ES 融合
-            if retrieval_mode == "hybrid":
-                from app.rag.core.multi_model_hybrid_retriever import MultiModelHybridRetriever
-                logger.info("使用多模型 Hybrid 检索器（向量+ES）")
-                return MultiModelHybridRetriever(
-                    multi_retriever=multi_retriever,
-                    keyword_retriever=self.es_keyword_retriever,
-                    vector_weight=0.7,
-                    keyword_weight=0.3,
-                    k=self.config.top_k
-                )
-            
-            return multi_retriever
-        
-        # 单模型模式：使用原有逻辑
         if retrieval_mode == "hybrid":
             return HybridRetriever(
                 vectorstore_manager=self.vectorstore_manager,
@@ -184,55 +112,18 @@ class RAGSystem:
             else:
                 logger.info(f"   ✅ API 端点: {emb_info['api_endpoint']}")
 
-            # 2. 初始化向量存储（支持多模型）
+            # 2. 初始化向量存储
             logger.info("2️⃣  初始化向量存储...")
-            
-            if multi_model_manager.multi_model_config:
-                # 多模型模式：初始化所有配置的模型
-                logger.info("   🔄 使用多模型模式...")
-                
-                # 为每个模型创建向量库（如果不存在则创建）
-                for model_name, model_config in multi_model_manager.multi_model_config.get_unique_models().items():
-                    logger.info(f"   📚 初始化模型: {model_config.model_name}")
-                    
-                    # 获取或创建嵌入管理器
-                    embedding_manager = multi_model_manager.get_or_create_embedding_manager(model_config)
-                    
-                    # 创建向量存储
-                    from app.rag.core.vectorstore import VectorStoreManager
-                    vector_store_path = multi_model_manager.get_vector_store_path(model_config)
-                    # 使用唯一的 collection_name，包含模型类型和模型名
-                    safe_model_name = model_config.model_name.replace("/", "_").replace("-", "_")
-                    collection_name = f"{self.config.collection_name}_{model_config.model_type}_{safe_model_name}"
-                    
-                    model_vs = VectorStoreManager(
-                        embeddings=embedding_manager.embeddings,
-                        persist_directory=vector_store_path,
-                        collection_name=collection_name
-                    )
-                    
-                    self.model_vectorstores[f"{model_config.model_type}_{model_config.model_name}"] = model_vs
-                    logger.info(f"   ✅ {model_config.model_name}: {os.path.abspath(vector_store_path)}")
-                
-                # 使用第一个模型作为主向量库（兼容旧代码）
-                first_model = list(multi_model_manager.multi_model_config.path_configs)[0]
-                first_key = f"{first_model.model_type}_{first_model.model_name}"
-                self.vectorstore_manager = self.model_vectorstores[first_key]
-                
-                logger.info(f"   ✅ 主向量库: {first_model.model_name}")
-            else:
-                # 单模型模式：使用原有逻辑
-                logger.info("   🔄 使用单模型模式...")
-                vector_store_path = self.config.get_vector_store_path()
-                self.vectorstore_manager = VectorStoreManager(
-                    embeddings=self.embedding_manager.embeddings,
-                    persist_directory=vector_store_path,
-                    collection_name=self.config.collection_name
-                )
-                logger.info(f"   ✅ 存储路径: {os.path.abspath(vector_store_path)}")
-                logger.info(f"   ℹ️  配置隔离: {self.config.embedding_type}_{self.config.embedding_model}")
-            
+            # 根据 embedding 配置生成专属路径
+            vector_store_path = self.config.get_vector_store_path()
+            self.vectorstore_manager = VectorStoreManager(
+                embeddings=self.embedding_manager.embeddings,
+                persist_directory=vector_store_path,
+                collection_name=self.config.collection_name
+            )
             logger.info(f"   ✅ 向量数据库: Chroma")
+            logger.info(f"   ✅ 存储路径: {os.path.abspath(vector_store_path)}")
+            logger.info(f"   ℹ️  配置隔离: {self.config.embedding_type}_{self.config.embedding_model}")
 
             # 3. 初始化文本分割器
             logger.info("3️⃣  初始化文本分割器...")
@@ -386,16 +277,7 @@ class RAGSystem:
                     # 如果文件已删除，使用第一个路径尝试构建路径
                     indexed_source = os.path.normpath(os.path.join(doc_paths[0], file_path))
 
-                # 多模型模式：从所有向量库删除（因为不知道原来在哪个库）
-                if multi_model_manager.multi_model_config:
-                    for model_key, model_vs in self.model_vectorstores.items():
-                        try:
-                            model_vs.delete_by_source(indexed_source)
-                        except Exception as e:
-                            logger.debug(f"从 {model_key} 删除失败（可能不存在）: {e}")
-                else:
-                    self.vectorstore_manager.delete_by_source(indexed_source)
-                
+                self.vectorstore_manager.delete_by_source(indexed_source)
                 if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
                     self.es_keyword_retriever.delete_by_source(indexed_source)
                 self.document_registry.unregister_document(file_path)
@@ -456,34 +338,19 @@ class RAGSystem:
                             docs_by_source[rel_source] = ([], base_path_for_source)
                         docs_by_source[rel_source][0].append(doc)
 
-                    # 逐个文档更新向量存储（支持多模型）
+                    # 逐个文档更新向量存储
                     for rel_source, (docs, base_path) in docs_by_source.items():
                         abs_source = os.path.join(base_path, rel_source)
                         indexed_source = os.path.normpath(abs_source)
 
-                        if multi_model_manager.multi_model_config:
-                            # 多模型模式：根据文件路径选择对应的向量库
-                            model_config = multi_model_manager.get_model_for_file(abs_source)
-                            model_key = f"{model_config.model_type}_{model_config.model_name}"
-                            
-                            if model_key in self.model_vectorstores:
-                                model_vs = self.model_vectorstores[model_key]
-                            else:
-                                # 回退到主向量库
-                                model_vs = self.vectorstore_manager
-                                logger.warning(f"未找到模型 {model_key} 的向量库，使用主向量库")
-                        else:
-                            # 单模型模式
-                            model_vs = self.vectorstore_manager
-
                         if rel_source in modified_files:
                             logger.info(f"🔄 更新: {rel_source}")
-                            model_vs.update_documents(docs, indexed_source)
+                            self.vectorstore_manager.update_documents(docs, indexed_source)
                             if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
                                 self.es_keyword_retriever.update_documents(docs, indexed_source)
                         else:
                             logger.info(f"➕ 新增: {rel_source}")
-                            model_vs.add_documents(docs)
+                            self.vectorstore_manager.add_documents(docs)
                             if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
                                 self.es_keyword_retriever.index_documents(docs)
 
@@ -523,70 +390,6 @@ class RAGSystem:
         except Exception as e:
             logger.error(f"❌ 智能同步失败: {e}")
             raise
-
-    async def _rebuild_multi_model(self, documents: List[Document]) -> int:
-        """
-        多模型重建知识库
-        
-        按模型配置将文档分组，分别索引到不同的向量库
-        
-        Args:
-            documents: 文档列表
-            
-        Returns:
-            索引的文档总数
-        """
-        logger.info("使用多模型模式重建...")
-        
-        # 1. 按模型分组文档
-        docs_by_model = multi_model_manager.group_documents_by_model(documents)
-        logger.info(f"文档分组: {len(docs_by_model)} 个模型")
-        
-        total_indexed = 0
-        
-        # 2. 为每个模型创建/获取向量库并索引
-        for model_key, docs in docs_by_model.items():
-            if not docs:
-                continue
-            
-            # 获取模型配置
-            sample_doc = docs[0]
-            model_config = multi_model_manager.get_model_for_file(
-                sample_doc.metadata.get("source", "")
-            )
-            
-            logger.info(f"📚 索引到 {model_config.model_name}: {len(docs)} 个文档")
-            
-            try:
-                # 获取或创建嵌入管理器
-                embedding_manager = multi_model_manager.get_or_create_embedding_manager(model_config)
-                
-                # 获取向量存储路径
-                persist_dir = multi_model_manager.get_vector_store_path(model_config)
-                
-                # 创建向量存储管理器
-                from app.rag.core.vectorstore import VectorStoreManager
-                safe_model_name = model_config.model_name.replace("/", "_").replace("-", "_")
-                collection_name = f"{self.config.collection_name}_{model_config.model_type}_{safe_model_name}"
-                vectorstore = VectorStoreManager(
-                    embeddings=embedding_manager.embeddings,
-                    persist_directory=persist_dir,
-                    collection_name=collection_name
-                )
-                
-                # 清空并重建
-                vectorstore.clear()
-                ids = vectorstore.add_documents(docs)
-                total_indexed += len(ids)
-                
-                logger.info(f"   ✅ {model_config.model_name}: {len(ids)} 个文档")
-                
-            except Exception as e:
-                logger.error(f"索引到 {model_config.model_name} 失败: {e}")
-                continue
-        
-        logger.info(f"✅ 多模型索引完成: {total_indexed} 个文档")
-        return total_indexed
 
     async def rebuild_knowledge_base(self) -> Dict[str, Any]:
         """
@@ -638,18 +441,10 @@ class RAGSystem:
             split_docs = self.text_splitter.split_documents(all_documents)
             logger.info(f"   ✅ 分割为 {len(split_docs)} 个文本块")
 
-            # 3. 重建向量存储（支持多模型）
+            # 3. 重建向量存储
             logger.info("🔄 重建向量存储...")
-            
-            if multi_model_manager.multi_model_config:
-                # 多模型模式：按模型分组索引
-                indexed_count = await self._rebuild_multi_model(split_docs)
-            else:
-                # 单模型模式：使用原有逻辑
-                ids = self.vectorstore_manager.rebuild(split_docs)
-                indexed_count = len(ids)
-            
-            logger.info(f"   ✅ 成功索引 {indexed_count} 个文本块")
+            ids = self.vectorstore_manager.rebuild(split_docs)
+            logger.info(f"   ✅ 成功索引 {len(ids)} 个文本块")
 
             # 3.5 重建 ES 关键词索引（可选）
             if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
@@ -699,28 +494,19 @@ class RAGSystem:
             logger.info(f"   ✅ 注册了 {len(docs_by_source)} 个文档")
 
             # 4.5 更新 Embedding 配置
-            if multi_model_manager.multi_model_config:
-                # 多模型模式：使用第一个模型的信息
-                first_model = list(multi_model_manager.multi_model_config.path_configs)[0]
-                self.document_registry.update_embedding_config(
-                    embedding_type=first_model.model_type,
-                    model_name=first_model.model_name,
-                    dimension=first_model.dimension
-                )
-            else:
-                emb_info = self.embedding_manager.get_info()
-                self.document_registry.update_embedding_config(
-                    embedding_type=emb_info['type'],
-                    model_name=emb_info['model'],
-                    dimension=emb_info['dimension']
-                )
+            emb_info = self.embedding_manager.get_info()
+            self.document_registry.update_embedding_config(
+                embedding_type=emb_info['type'],
+                model_name=emb_info['model'],
+                dimension=emb_info['dimension']
+            )
             self.document_registry.save()
 
             result = {
                 "status": "success",
                 "original_documents": len(all_documents),
                 "split_documents": len(split_docs),
-                "indexed_documents": indexed_count,
+                "indexed_documents": len(ids),
                 "registered_files": len(docs_by_source),
                 "collection_name": self.config.collection_name
             }

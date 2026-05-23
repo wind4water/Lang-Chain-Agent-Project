@@ -15,6 +15,9 @@ from app.rag.config import rag_config
 
 logger = logging.getLogger(__name__)
 
+# 全局 Chroma 客户端缓存，按 persist_dir 隔离
+_chroma_client_cache: Dict[str, any] = {}
+
 
 class MultiModelVectorStoreManager:
     """
@@ -109,6 +112,27 @@ class MultiModelVectorStoreManager:
             f"{model_config.model_type}_{safe_model_name}"
         )
 
+    def _get_or_create_chroma_client(self, persist_dir: str):
+        """获取或创建 Chroma 客户端（全局单例，按目录隔离）"""
+        global _chroma_client_cache
+        
+        cache_key = os.path.abspath(persist_dir)
+        
+        if cache_key not in _chroma_client_cache:
+            import chromadb
+            logger.info(f"[MultiModel] 创建新的 Chroma 客户端: {cache_key}")
+            _chroma_client_cache[cache_key] = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    is_persistent=True
+                )
+            )
+        else:
+            logger.info(f"[MultiModel] 复用已存在的 Chroma 客户端: {cache_key}")
+        
+        return _chroma_client_cache[cache_key]
+
     def get_vector_store_for_path(self, file_path: str) -> Chroma:
         """
         根据文件路径获取对应的向量库
@@ -130,11 +154,18 @@ class MultiModelVectorStoreManager:
         embeddings = self._get_embedding_model(model_config)
         persist_dir = self._get_vector_store_path(model_config)
         
+        # 使用唯一的 collection_name
+        safe_model_name = model_config.model_name.replace("/", "_").replace("-", "_")
+        collection_name = f"{rag_config.collection_name}_{model_config.model_type}_{safe_model_name}"
+        
+        # 使用全局缓存的客户端，避免重复创建
+        client = self._get_or_create_chroma_client(persist_dir)
+        
         vectorstore = Chroma(
-            collection_name=rag_config.collection_name,
+            client=client,  # 关键：传入已创建的 PersistentClient
+            collection_name=collection_name,
             embedding_function=embeddings,
-            persist_directory=persist_dir,
-            client_settings=Settings(anonymized_telemetry=False),
+            # 注意：传入 client 后不需要 persist_directory
         )
         
         self._vectorstore_cache[cache_key] = vectorstore
