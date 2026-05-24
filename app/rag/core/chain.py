@@ -660,6 +660,8 @@ class RAGChain:
                     # 打印详细日志
                     logger.info(f"  来源-{i+1}: {filename}")
                     logger.info(f"    RRF分数: {rrf_score:.4f}")
+                    if doc.metadata.get('_rerank_score'):
+                        logger.info(f"    Rerank分数: {doc.metadata['_rerank_score']:.4f}")
                     logger.info(f"    检索来源: {rrf_sources}")
                     logger.info(f"    文件路径: {source}")
             
@@ -750,6 +752,8 @@ class RAGChain:
                     # 打印详细日志
                     logger.info(f"  来源-{i+1}: {filename}")
                     logger.info(f"    RRF分数: {rrf_score:.4f}")
+                    if doc.metadata.get('_rerank_score'):
+                        logger.info(f"    Rerank分数: {doc.metadata['_rerank_score']:.4f}")
                     logger.info(f"    检索来源: {rrf_sources}")
                     logger.info(f"    文件路径: {source}")
             

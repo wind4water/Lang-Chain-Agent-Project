@@ -1,6 +1,7 @@
 """
 多模型 + ES 混合检索器 - RRF 三路融合版本
 支持 BGE、代码模型(UniXcoder/CodeBERT)、ES 三路并行检索，使用 RRF 算法融合结果
+可选 Cross-Encoder Reranker 精排
 """
 from typing import List, Optional, Any, Dict
 from collections import defaultdict
@@ -9,6 +10,8 @@ from langchain_core.retrievers import BaseRetriever
 from pydantic import Field
 import logging
 import asyncio
+
+from app.rag.core.reranker import RerankerManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +52,11 @@ class MultiModelHybridRetriever(BaseRetriever):
     
     # 每路检索的 top_k（内部使用，可配置）
     per_retriever_k: int = Field(20, description="每路检索器返回的结果数")
+    
+    # Reranker 参数
+    use_reranker: bool = Field(True, description="是否使用 Reranker 进行精排")
+    reranker_top_k: int = Field(20, description="传给 Reranker 的候选数量")
+    reranker_final_k: int = Field(5, description="Reranker 精排后返回的数量")
     
     class Config:
         arbitrary_types_allowed = True
@@ -135,14 +143,14 @@ class MultiModelHybridRetriever(BaseRetriever):
             results_by_source['es'] = []
         
         # 2. RRF 融合
-        final_results = self._rrf_fusion(results_by_source)
+        final_results = self._rrf_fusion(results_by_source, query)
         
         logger.info(f"RRF 融合完成: 返回 {len(final_results)} 条结果")
         return final_results
 
-    def _rrf_fusion(self, results_by_source: Dict[str, List[Document]]) -> List[Document]:
+    def _rrf_fusion(self, results_by_source: Dict[str, List[Document]], query: str) -> List[Document]:
         """
-        RRF (Reciprocal Rank Fusion) 融合算法
+        RRF (Reciprocal Rank Fusion) 融合算法 + Reranker 精排
         
         公式: score = Σ 1/(k + rank)
         
@@ -150,6 +158,7 @@ class MultiModelHybridRetriever(BaseRetriever):
         
         Args:
             results_by_source: 各检索源的结果列表
+            query: 查询文本（用于 Reranker）
             
         Returns:
             按 RRF 分数排序的文档列表
@@ -228,6 +237,26 @@ class MultiModelHybridRetriever(BaseRetriever):
                 sources = doc.metadata.get('_sources', [])
                 logger.info(f"  结果-{i}: RRF分数={score:.4f}, 来源={sources}")
         
+        # Reranker 精排
+        if self.use_reranker and len(unique_results) > 1:
+            # 取更多候选给 Reranker
+            candidates = sorted_docs[:self.reranker_top_k]
+            logger.info(f"Reranker 精排: {len(candidates)} 候选")
+            
+            try:
+                reranked = RerankerManager.rerank(query, candidates, top_k=self.reranker_final_k)
+                if reranked:
+                    logger.info(f"Reranker 精排完成: {len(candidates)} -> {len(reranked)} 条")
+                    # 记录 Reranker 后的 TOP 结果
+                    for i, doc in enumerate(reranked[:3], 1):
+                        rrf_score = doc.metadata.get('_rrf_score', 0)
+                        rerank_score = doc.metadata.get('_rerank_score', 0)
+                        filename = doc.metadata.get('filename', 'unknown')
+                        logger.info(f"  Rerank-TOP-{i}: rrf={rrf_score:.4f}, rerank={rerank_score:.4f}, file={filename}")
+                    return reranked
+            except Exception as e:
+                logger.warning(f"Reranker 失败，使用 RRF 结果: {e}")
+        
         return unique_results
 
     async def _aget_relevant_documents(self, query: str) -> List[Document]:
@@ -278,7 +307,7 @@ class MultiModelHybridRetriever(BaseRetriever):
                 logger.info(f"  {source_name}检索: {len(results_by_source[source_name])} 条")
         
         # 2. RRF 融合
-        final_results = self._rrf_fusion(results_by_source)
+        final_results = self._rrf_fusion(results_by_source, query)
         
         logger.info(f"RRF 融合完成: 返回 {len(final_results)} 条结果")
         return final_results

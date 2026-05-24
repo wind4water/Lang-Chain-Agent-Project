@@ -118,7 +118,10 @@ class RAGSystem:
                     es_retriever=self.es_keyword_retriever,
                     rrf_k=60,  # RRF 常数，Google 推荐值
                     k=self.config.top_k,
-                    per_retriever_k=self.config.top_k * 4  # 每路取更多，RRF 后取 top_k
+                    per_retriever_k=self.config.top_k * 4,  # 每路取更多，RRF 后取 top_k
+                    use_reranker=True,
+                    reranker_top_k=20,
+                    reranker_final_k=self.config.top_k
                 )
             
             # 非 hybrid 模式：使用原有的 MultiModelRetriever (BGE + CodeBERT 内部融合)

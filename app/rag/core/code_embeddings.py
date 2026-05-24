@@ -61,12 +61,12 @@ class UniXcoderEmbeddings(Embeddings):
         self._tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
             trust_remote_code=True,
-            local_files_only=False
+            local_files_only=True
         )
         self._model = AutoModel.from_pretrained(
             self.model_name,
             trust_remote_code=True,
-            local_files_only=False
+            local_files_only=True
         )
         
         self._model.to(self.device)
