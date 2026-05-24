@@ -106,7 +106,7 @@ class RAGSystem:
                         logger.info(f"  BGE 检索器 (推断): {model_key}")
                     else:
                         codebert_retriever = retriever
-                        logger.info(f"  CodeBERT 检索器 (推断): {model_key}")
+                        logger.info(f"  代码检索器 (推断): {model_key}")
             
             # Hybrid 模式：三路 RRF 融合 (文档模型 + 代码模型 + ES)
             if retrieval_mode == "hybrid":
@@ -124,7 +124,7 @@ class RAGSystem:
                     reranker_final_k=self.config.top_k
                 )
             
-            # 非 hybrid 模式：使用原有的 MultiModelRetriever (BGE + CodeBERT 内部融合)
+            # 非 hybrid 模式：使用原有的 MultiModelRetriever (BGE + 代码模型 内部融合)
             from app.rag.core.multi_model_retriever import MultiModelRetriever
             
             retrievers = []

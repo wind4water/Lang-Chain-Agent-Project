@@ -717,7 +717,7 @@ class RAGChain:
                     logger.info(f"    文件路径: {source}")
             
             # 汇总统计
-            source_type_count = {"bge": 0, "codebert": 0, "es": 0}
+            source_type_count = {"bge": 0, "code": 0, "es": 0}
             for s in sources:
                 for src in s.get("rrf_sources", []):
                     src_type = src.split("#")[0] if "#" in src else src
@@ -727,7 +727,7 @@ class RAGChain:
             logger.info(f"📊 来源统计:")
             logger.info(f"  总来源数: {len(sources)}")
             logger.info(f"  BGE来源: {source_type_count['bge']} 个")
-            logger.info(f"  CodeBERT来源: {source_type_count['codebert']} 个")
+            logger.info(f"  代码来源: {source_type_count['code']} 个")
             logger.info(f"  ES来源: {source_type_count['es']} 个")
 
             result = {
@@ -807,7 +807,7 @@ class RAGChain:
                     logger.info(f"    文件路径: {source}")
             
             # 汇总统计
-            source_type_count = {"bge": 0, "codebert": 0, "es": 0}
+            source_type_count = {"bge": 0, "code": 0, "es": 0}
             for s in sources:
                 for src in s.get("rrf_sources", []):
                     src_type = src.split("#")[0] if "#" in src else src
@@ -817,7 +817,7 @@ class RAGChain:
             logger.info(f"📊 来源统计:")
             logger.info(f"  总来源数: {len(sources)}")
             logger.info(f"  BGE来源: {source_type_count['bge']} 个")
-            logger.info(f"  CodeBERT来源: {source_type_count['codebert']} 个")
+            logger.info(f"  代码来源: {source_type_count['code']} 个")
             logger.info(f"  ES来源: {source_type_count['es']} 个")
 
             result = {
