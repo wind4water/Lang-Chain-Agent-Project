@@ -57,3 +57,5 @@ app/data/
 # 通用 skill 进入版本管理；仅忽略敏感 skill
 app/skills/sensitive/
 app/skills/**/*.sensitive.json
+
+models
