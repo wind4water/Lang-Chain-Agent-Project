@@ -130,6 +130,10 @@ class RAGConfig(BaseModel):
         default_factory=lambda: int(os.getenv("ES_REQUEST_TIMEOUT", "30")),
         description="ES 请求超时时间（秒）"
     )
+    es_analyzer: str = Field(
+        default_factory=lambda: os.getenv("ES_ANALYZER", "ik"),
+        description="ES 分析器类型: ik（需安装 analysis-ik 插件）, standard（内置）"
+    )
 
     # HNSW 配置
     hnsw_space: str = Field(

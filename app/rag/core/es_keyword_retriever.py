@@ -89,6 +89,59 @@ class ESKeywordRetriever:
         return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
     def _build_index_mapping(self) -> Dict[str, Any]:
+        """
+        构建 ES 索引 mapping，使用 IK 分词器提升中文检索效果。
+
+        分析器配置：
+        - ik_max_word: 索引时使用，最细粒度分词（尽可能多的词条，提高召回率）
+        - ik_smart: 搜索时使用，智能分词（更少的词条，提高精确度）
+        - 需要 ES 安装 analysis-ik 插件
+
+        回退策略：如果 IK 插件未安装，ES 会拒绝创建索引，
+        此时会回退到 standard analyzer。
+        """
+        return {
+            "settings": {
+                "analysis": {
+                    "analyzer": {
+                        "ik_max_word": {
+                            "type": "custom",
+                            "tokenizer": "ik_max_word",
+                            "filter": ["lowercase"]
+                        },
+                        "ik_smart": {
+                            "type": "custom",
+                            "tokenizer": "ik_smart",
+                            "filter": ["lowercase"]
+                        }
+                    }
+                }
+            },
+            "mappings": {
+                "dynamic": True,
+                "properties": {
+                    "content": {
+                        "type": "text",
+                        "analyzer": "ik_max_word",
+                        "search_analyzer": "ik_smart"
+                    },
+                    "source": {"type": "keyword"},
+                    "filename": {
+                        "type": "text",
+                        "analyzer": "ik_max_word",
+                        "search_analyzer": "ik_smart",
+                        "fields": {"keyword": {"type": "keyword"}}
+                    },
+                    "extension": {"type": "keyword"},
+                    "doc_group": {"type": "keyword"},
+                    "start_index": {"type": "integer"},
+                    "metadata": {"type": "object", "enabled": True},
+                }
+            }
+        }
+
+    def _build_fallback_mapping(self) -> Dict[str, Any]:
+        """IK 插件不可用时的回退 mapping（standard analyzer）。"""
         return {
             "settings": {
                 "analysis": {
@@ -123,11 +176,23 @@ class ESKeywordRetriever:
 
         try:
             if not self._client.indices.exists(index=self.index_name):
-                self._client.indices.create(
-                    index=self.index_name,
-                    body=self._build_index_mapping()
-                )
-                logger.info("已创建 ES 索引: %s", self.index_name)
+                try:
+                    self._client.indices.create(
+                        index=self.index_name,
+                        body=self._build_index_mapping()
+                    )
+                    logger.info("已创建 ES 索引（IK 分词）: %s", self.index_name)
+                except Exception as ik_err:
+                    # IK 插件未安装，回退到 standard analyzer
+                    logger.warning(
+                        "IK 分析器创建失败（可能未安装 IK 插件），回退 standard: %s",
+                        ik_err
+                    )
+                    self._client.indices.create(
+                        index=self.index_name,
+                        body=self._build_fallback_mapping()
+                    )
+                    logger.info("已创建 ES 索引（standard 回退）: %s", self.index_name)
         except Exception as e:
             logger.warning("确保 ES 索引失败: %s", e)
 
@@ -310,6 +375,41 @@ class ESKeywordRetriever:
             return 0
         self.clear()
         return self.index_documents(documents)
+
+    def reindex_with_ik(self) -> bool:
+        """
+        删除旧索引并用 IK 分词重建索引结构。
+        调用此方法后需要重新写入文档（调用 rebuild）。
+
+        Returns:
+            True 表示使用了 IK 分词，False 表示回退到了 standard。
+        """
+        if not self.available:
+            return False
+        assert self._client is not None
+
+        try:
+            if self._client.indices.exists(index=self.index_name):
+                self._client.indices.delete(index=self.index_name)
+                logger.info("已删除旧索引: %s", self.index_name)
+
+            self._client.indices.create(
+                index=self.index_name,
+                body=self._build_index_mapping()
+            )
+            logger.info("✅ 已用 IK 分词重建索引: %s", self.index_name)
+            return True
+        except Exception as e:
+            logger.warning("IK 索引创建失败，尝试回退: %s", e)
+            try:
+                self._client.indices.create(
+                    index=self.index_name,
+                    body=self._build_fallback_mapping()
+                )
+                logger.info("已回退到 standard 分词: %s", self.index_name)
+            except Exception as e2:
+                logger.error("索引重建完全失败: %s", e2)
+            return False
 
     def get_relevant_documents(self, query: str) -> List[Document]:
         """

@@ -31,7 +31,7 @@ langchain-text-splitters>=0.0.1  # 文本分割
 pypdf>=3.17.0                 # PDF 文档加载
 python-docx>=1.1.0            # Word 文档加载
 unstructured>=0.11.0          # 文档加载器（Markdown等）
-elasticsearch>=8.14.0         # ES 关键词召回（可选）
+elasticsearch>=8.14.0         # ES 关键词召回（可选，需安装 IK 分词插件）
 
 # 本地 Embedding 模型支持（可选，推荐）⭐
 langchain-huggingface>=0.1.0  # HuggingFace Embeddings 集成

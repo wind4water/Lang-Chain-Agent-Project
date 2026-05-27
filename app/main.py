@@ -21,6 +21,7 @@ logging.basicConfig(
     ]
 )
 
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -490,12 +491,30 @@ async def rag_query(request: RAGQueryRequest):
             raise HTTPException(status_code=500, detail=f"RAG 查询失败: {str(e)}")
 
 
-@app.post("/rag/rebuild")
-async def rag_rebuild():
-    """
-    重建知识库（全量重建）
+class RebuildRequest(BaseModel):
+    """重建知识库请求体"""
+    targets: Optional[List[str]] = Field(
+        default=None,
+        description="重建目标列表: es(关键词索引), doc(文档向量库), code(代码向量库)。不传或传空则全部重建",
+        examples=[["es"], ["doc", "code"]]
+    )
 
-    清空并重新索引所有文档
+
+@app.post("/rag/rebuild")
+async def rag_rebuild(request: RebuildRequest = RebuildRequest()):
+    """
+    重建知识库（支持选择性重建）
+
+    请求体 JSON 参数 targets（可选）:
+    - "es": 重建 ES 关键词索引（IK 分词）
+    - "doc": 重建文档向量库（BGE 等通用文本模型）
+    - "code": 重建代码向量库（UniXcoder/CodeBERT 等代码模型）
+    - 不传或传空: 全部重建
+
+    示例:
+    - POST /rag/rebuild                        → 全部重建
+    - POST /rag/rebuild  {"targets":["es"]}    → 仅重建 ES 关键词索引
+    - POST /rag/rebuild  {"targets":["doc","code"]} → 重建文档和代码向量库
     """
     async with request_token_scope():
         try:
@@ -505,9 +524,10 @@ async def rag_rebuild():
                     detail="RAG 系统未初始化。请检查 RAG_ENABLED 配置"
                 )
 
-            result = await rag_system.rebuild_knowledge_base()
+            result = await rag_system.rebuild_knowledge_base(targets=request.targets)
+            target_desc = ", ".join(request.targets) if request.targets else "全部"
             return _with_request_tokens({
-                "message": "知识库全量重建完成",
+                "message": f"知识库重建完成 (targets: {target_desc})",
                 **result
             })
 

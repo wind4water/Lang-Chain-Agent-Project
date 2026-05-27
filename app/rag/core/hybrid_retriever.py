@@ -33,7 +33,12 @@ class HybridRetriever(BaseRetriever):
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
-        """轻量分词：英文词 + 单字中文。"""
+        """
+        轻量分词：英文词 + 单字中文。
+
+        注：此方法仅用于 ES 不可用时的本地回退关键词匹配。
+        生产环境中文分词由 ES IK 插件（ik_max_word / ik_smart）完成。
+        """
         if not text:
             return []
         lowered = text.lower()

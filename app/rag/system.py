@@ -560,7 +560,12 @@ class RAGSystem:
             logger.error(f"❌ 智能同步失败: {e}")
             raise
 
-    async def _rebuild_multi_model(self, documents: List[Document]) -> int:
+    async def _rebuild_multi_model(
+        self,
+        documents: List[Document],
+        rebuild_doc: bool = True,
+        rebuild_code: bool = True,
+    ) -> int:
         """
         多模型重建知识库
         
@@ -568,11 +573,13 @@ class RAGSystem:
         
         Args:
             documents: 文档列表
+            rebuild_doc: 是否重建文档向量库（BGE 等通用文本模型）
+            rebuild_code: 是否重建代码向量库（UniXcoder/CodeBERT 等代码模型）
             
         Returns:
             索引的文档总数
         """
-        logger.info("使用多模型模式重建...")
+        logger.info("使用多模型模式重建 (rebuild_doc=%s, rebuild_code=%s)...", rebuild_doc, rebuild_code)
         
         # 1. 按模型分组文档
         docs_by_model = multi_model_manager.group_documents_by_model(documents)
@@ -590,6 +597,15 @@ class RAGSystem:
             model_config = multi_model_manager.get_model_for_file(
                 sample_doc.metadata.get("source", "")
             )
+
+            # 根据模型类型判断是否需要重建
+            is_code_model = model_config.model_type in ("codebert", "unixcoder", "code")
+            if is_code_model and not rebuild_code:
+                logger.info(f"⏭️  跳过代码向量库: {model_config.model_name}（未在 targets 中）")
+                continue
+            if not is_code_model and not rebuild_doc:
+                logger.info(f"⏭️  跳过文档向量库: {model_config.model_name}（未在 targets 中）")
+                continue
             
             logger.info(f"📚 索引到 {model_config.model_name}: {len(docs)} 个文档")
             
@@ -624,14 +640,35 @@ class RAGSystem:
         logger.info(f"✅ 多模型索引完成: {total_indexed} 个文档")
         return total_indexed
 
-    async def rebuild_knowledge_base(self) -> Dict[str, Any]:
+    async def rebuild_knowledge_base(
+        self,
+        targets: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """
-        重建知识库（全量重建）
+        重建知识库（支持选择性重建）
+
+        Args:
+            targets: 要重建的目标列表，可选值:
+                - "es": 重建 ES 关键词索引
+                - "doc": 重建文档向量库（BGE 等通用文本模型）
+                - "code": 重建代码向量库（UniXcoder/CodeBERT 等代码模型）
+                - None 或空列表: 全部重建（等同于 ["es", "doc", "code"]）
 
         Returns:
             重建结果统计
         """
-        logger.info("开始重建知识库（全量）...")
+        # 不传或传空 → 全部重建
+        if not targets:
+            targets = ["es", "doc", "code"]
+
+        rebuild_es = "es" in targets
+        rebuild_doc = "doc" in targets
+        rebuild_code = "code" in targets
+
+        logger.info(
+            "开始重建知识库: targets=%s (es=%s, doc=%s, code=%s)",
+            targets, rebuild_es, rebuild_doc, rebuild_code
+        )
 
         documents_path = self.config.documents_path
 
@@ -674,24 +711,38 @@ class RAGSystem:
             split_docs = self.text_splitter.split_documents(all_documents)
             logger.info(f"   ✅ 分割为 {len(split_docs)} 个文本块")
 
-            # 3. 重建向量存储（支持多模型）
-            logger.info("🔄 重建向量存储...")
-            
-            if multi_model_manager.multi_model_config:
-                # 多模型模式：按模型分组索引
-                indexed_count = await self._rebuild_multi_model(split_docs)
-            else:
-                # 单模型模式：使用原有逻辑
-                ids = self.vectorstore_manager.rebuild(split_docs)
-                indexed_count = len(ids)
-            
-            logger.info(f"   ✅ 成功索引 {indexed_count} 个文本块")
+            # 3. 按 targets 选择性重建
+            indexed_count = 0
+            es_count = 0
 
-            # 3.5 重建 ES 关键词索引（可选）
-            if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
-                logger.info("🔄 重建 ES 关键词索引...")
-                es_count = self.es_keyword_retriever.rebuild(split_docs)
-                logger.info(f"   ✅ ES 成功索引 {es_count} 个文本块")
+            if rebuild_doc or rebuild_code:
+                if multi_model_manager.multi_model_config:
+                    # 多模型模式：按模型分组，根据 targets 过滤
+                    indexed_count = await self._rebuild_multi_model(
+                        split_docs,
+                        rebuild_doc=rebuild_doc,
+                        rebuild_code=rebuild_code,
+                    )
+                else:
+                    # 单模型模式：仅在 rebuild_doc 时重建
+                    if rebuild_doc:
+                        logger.info("🔄 重建文档向量库...")
+                        ids = self.vectorstore_manager.rebuild(split_docs)
+                        indexed_count = len(ids)
+                        logger.info(f"   ✅ 文档向量库: 成功索引 {indexed_count} 个文本块")
+                    else:
+                        logger.info("⏭️  跳过文档向量库重建（未在 targets 中）")
+
+            # 3.5 重建 ES 关键词索引
+            if rebuild_es:
+                if self.es_keyword_retriever is not None and self.es_keyword_retriever.available:
+                    logger.info("🔄 重建 ES 关键词索引（IK 分词）...")
+                    es_count = self.es_keyword_retriever.rebuild(split_docs)
+                    logger.info(f"   ✅ ES 关键词索引: 成功索引 {es_count} 个文本块")
+                else:
+                    logger.warning("⚠️  ES 关键词召回不可用，跳过 ES 索引重建")
+            else:
+                logger.info("⏭️  跳过 ES 关键词索引重建（未在 targets 中）")
 
             # 4. 重建文档注册表
             logger.info("📝 重建文档注册表...")
@@ -754,9 +805,11 @@ class RAGSystem:
 
             result = {
                 "status": "success",
+                "targets": targets,
                 "original_documents": len(all_documents),
                 "split_documents": len(split_docs),
                 "indexed_documents": indexed_count,
+                "es_indexed_documents": es_count,
                 "registered_files": len(docs_by_source),
                 "collection_name": self.config.collection_name
             }
